@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import streamlit as st
+import pandas as pd
 
 # Ensure the project root is on the path
 sys.path.insert(0, os.path.dirname(__file__))
