@@ -21,7 +21,7 @@ class QueryEngine:
     and suggests visualizations.
     """
 
-    def __init__(self, api_key: str, model_name: str = "gemini-1.5-flash"):
+    def __init__(self, api_key: str, model_name: str = "gemini-2.0-flash"):
         if not api_key:
             raise ValueError("Gemini API key is required for AI Query functionality.")
         
@@ -75,8 +75,14 @@ You are an expert Data Analyst and SQL Engineer. Your goal is to translate natur
 """
         # Start the chat session
         self.chat = None
-        # Try specifically the requested model first, then fallbacks
-        models_to_try = [self.model_name, "gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-pro"]
+        # Try the requested model first, then fallbacks (all confirmed available)
+        models_to_try = [
+            self.model_name,
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-2.0-flash-001",
+            "gemini-2.5-flash-preview-04-17",
+        ]
         
         last_error = None
         for m_name in models_to_try:

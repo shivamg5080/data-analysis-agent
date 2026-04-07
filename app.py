@@ -89,9 +89,15 @@ with st.sidebar:
 
     selected_model = st.selectbox(
         "Model Version",
-        options=["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-1.0-pro"],
+        options=[
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-2.5-flash-preview-04-17",
+            "gemini-2.5-pro-preview-03-25",
+            "gemini-2.0-flash-001",
+        ],
         index=0,
-        help="Choose the model version. 1.5 Flash is recommended for speed and cost. If you get a 404 error, try gemini-pro or gemini-1.5-flash-latest."
+        help="Choose the Gemini model. 'gemini-2.0-flash' is recommended — fast and widely available."
     )
 
     st.markdown("---")
