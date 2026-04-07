@@ -247,14 +247,14 @@ if st.session_state.all_results:
                 elif turn.get("full_text") and not turn.get("sql"):
                     st.info(turn["full_text"])
 
-                # 2. Visualization
+                # 2. Visualization (Prominent)
                 if turn.get("df_result") is not None:
                     if turn.get("viz") and turn["viz"].get("fig"):
                         st.plotly_chart(turn["viz"]["fig"], use_container_width=True, key=f"viz_{i}")
                         if turn["viz"].get("insight"):
-                            st.caption(f"📌 {turn['viz']['insight']}")
-                    else:
-                        st.dataframe(turn["df_result"].head(10), use_container_width=True)
+                            st.markdown(f"<div style='margin-top:-1rem; margin-bottom:1rem;'><small>📌 <em>{turn['viz']['insight']}</em></small></div>", unsafe_allow_html=True)
+                    elif len(turn["df_result"]) > 0:
+                        st.dataframe(turn["df_result"].head(20), use_container_width=True)
 
                 # 3. Technical Details (Collapsed)
                 with st.expander("🛠️ Show SQL & Reasoning", expanded=False):

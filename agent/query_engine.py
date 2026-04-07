@@ -259,16 +259,19 @@ You are an expert Data Analyst. Your goal is to translate natural language into 
         cols = df_result.columns.tolist()
         num_rows = len(df_result)
 
-        prompt = f"""You are a helpful Data Assistant speaking to a non-technical business user.
-Answer their question clearly and concisely based ONLY on the data shown below.
-Do NOT mention SQL, code, or technical jargon. Be direct and friendly.
+        prompt = f"""You are a senior data analyst. Answer the user's question based on the provided data.
+Question: {original_query}
 
-User Question: {original_query}
+Data ({num_rows} rows):
+{df_result.head(15).to_markdown()}
 
-Results ({num_rows} rows returned, Columns: {', '.join(cols)}):
-{df_result.head(10).to_markdown()}
-
-Write a short, clear answer in 1-3 sentences. Include key numbers or counts where relevant."""
+Guidelines:
+1. Be concise (2-4 sentences).
+2. Use a friendly, professional tone.
+3. Highlight key findings, trends, or outliers.
+4. If there's a single main takeaway, lead with it.
+5. Do NOT mention SQL or technical column names if they are messy.
+"""
 
         try:
             response = self.client.models.generate_content(model=self.model_name, contents=prompt)
@@ -392,23 +395,47 @@ Return ONLY a valid JSON object (no extra text):
     def _heuristic_visualization(self, df: pd.DataFrame) -> dict:
         """Simple rule-based chart when AI suggestion fails."""
         import plotly.express as px
+        import plotly.graph_objects as go
 
-        cols = df.columns.tolist()
         num_cols = df.select_dtypes(include="number").columns.tolist()
         cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
 
         try:
+            # Case 1: Single Number (Metric)
+            if len(df) == 1 and num_cols:
+                val = float(df[num_cols[0]].iloc[0])
+                fig = go.Figure(go.Indicator(
+                    mode="number",
+                    value=val,
+                    title={"text": num_cols[0].replace("_", " ").title()},
+                    number={"font": {"size": 60}, "valueformat": ",.2f"}
+                ))
+                fig.update_layout(height=250, margin=dict(l=20, r=20, t=50, b=20))
+                return {"type": "kpi", "fig": fig, "insight": f"The calculated {num_cols[0]} is {val:,.2f}."}
+
+            # Case 2: Categories and Numbers (Bar Chart)
             if cat_cols and num_cols:
                 fig = px.bar(df.head(20), x=cat_cols[0], y=num_cols[0],
                              title=f"{num_cols[0]} by {cat_cols[0]}", template="plotly_white",
                              color_discrete_sequence=["#2d6a9f"])
                 fig.update_layout(margin=dict(l=20, r=20, t=50, b=20), height=420)
-                return {"type": "bar", "fig": fig, "insight": "Auto-generated bar chart."}
+                return {"type": "bar", "fig": fig, "insight": f"Breakdown of {num_cols[0]} across {cat_cols[0]}."}
+
+            # Case 3: List of numbers (Histogram or Bar by Index)
             elif num_cols:
-                fig = px.histogram(df, x=num_cols[0], title=f"Distribution of {num_cols[0]}",
-                                   template="plotly_white", color_discrete_sequence=["#2d6a9f"])
+                if len(df) <= 10:
+                    # Small list (e.g. top 5 ages) -> Bar chart by index
+                    fig = px.bar(df, x=df.index.astype(str), y=num_cols[0],
+                                 title=f"Values for {num_cols[0]}", labels={"index": "Row", num_cols[0]: "Value"},
+                                 template="plotly_white", color_discrete_sequence=["#2d6a9f"])
+                else:
+                    # Larger list -> Histogram
+                    fig = px.histogram(df, x=num_cols[0], title=f"Distribution of {num_cols[0]}",
+                                       template="plotly_white", color_discrete_sequence=["#2d6a9f"])
+                
                 fig.update_layout(margin=dict(l=20, r=20, t=50, b=20), height=420)
-                return {"type": "histogram", "fig": fig, "insight": "Auto-generated histogram."}
+                return {"type": "histogram", "fig": fig, "insight": f"Visualization of the values in {num_cols[0]}."}
+
         except Exception as e:
             logger.warning(f"Heuristic chart failed: {e}")
 
