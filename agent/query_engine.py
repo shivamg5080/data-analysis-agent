@@ -21,7 +21,7 @@ class QueryEngine:
     and suggests visualizations.
     """
 
-    def __init__(self, api_key: str, model_name: str = "gemini-flash-latest"):
+    def __init__(self, api_key: str, model_name: str = "gemini-1.5-flash"):
         if not api_key:
             raise ValueError("Gemini API key is required for AI Query functionality.")
         
@@ -57,11 +57,15 @@ You are an expert Data Analyst and SQL Engineer. Your goal is to translate natur
 --- CRITICAL RULES ---
 1. **MULTI-TABLE JOINS**: If the query spans multiple tables, use standard SQL JOINs with the correct table names.
 2. **STRICT COLUMN ADHERENCE**: Use ONLY the exact 'raw_column' names listed.
-3. **VERIFICATION**: If you are unsure about a column mapping (e.g., user says 'product' but you see 'security_name' and 'item_id'), STOP and output a 'VERIFICATION_REQUIRED' block.
-4. **SUGGESTIONS**: After every successful SQL generation, provide 2-3 'SMART_SUGGESTIONS' for the next logical query.
-5. Use standard SQL compatible with DuckDB.
-6. The response MUST follow this structured format:
-   EXPLANATION: [Brief reasoning]
+3. **VERIFICATION**: If you are unsure about a column mapping, STOP and output a 'VERIFICATION_REQUIRED' block.
+4. **SQL FORMATTING**: ALWAYS wrap your SQL code in a markdown block like this:
+   ```sql
+   SELECT * FROM table...
+   ```
+5. **SUGGESTIONS**: After every successful SQL generation, provide 2-3 'SMART_SUGGESTIONS' for the next logical query.
+6. Use standard SQL compatible with DuckDB.
+7. The response MUST follow this structured format:
+   EXPLANATION: [Brief technical reasoning]
    SQL: [The SQL code block]
    STATUS: [SUCCESS or VERIFICATION_REQUIRED]
    CORRECTION_PROMPT: [If VERIFICATION_REQUIRED, the question to ask the user]
@@ -71,7 +75,19 @@ You are an expert Data Analyst and SQL Engineer. Your goal is to translate natur
         # Start the chat session
         self.chat = self.model.start_chat(history=[])
         # Send the initial instructions as a preamble
-        self.chat.send_message(f"SYSTEM INSTRUCTIONS:\n{system_instruction}\nPlease acknowledge and wait for the first user question.")
+        try:
+            self.chat.send_message(f"SYSTEM INSTRUCTIONS:\n{system_instruction}\nPlease acknowledge and wait for the first user question.")
+        except Exception as e:
+            if "PermissionDenied" in str(e) or "403" in str(e):
+                raise PermissionError(
+                    "Google Generative AI: Permission Denied (403).\n"
+                    "Possible Fixes:\n"
+                    "1. Check if your Gemini API key is valid.\n"
+                    "2. Ensure the 'Generative Language API' is ENABLED in your Google Cloud Console for the associated project.\n"
+                    "3. Check for regional availability—some regions have limited access to certain models.\n"
+                    "4. If you recently restricted the key to specific APIs, ensure the Generative Language API is included."
+                ) from e
+            raise RuntimeError(f"Failed to initialize AI Assistant: {e}") from e
 
     def generate_sql(self, query: str, results_dict: dict = None) -> dict:
         """
@@ -136,17 +152,53 @@ You are an expert Data Analyst and SQL Engineer. Your goal is to translate natur
 
     def _extract_sql(self, text: str) -> Optional[str]:
         """Extracts SQL from a potentially conversational response."""
-        # 1. Try markdown blocks
+        # 1. Try markdown blocks (primary)
         match = re.search(r"```sql\s*(.*?)\s*```", text, re.DOTALL | re.IGNORECASE)
         if match:
             return match.group(1).strip()
         
-        # 2. Try raw SELECT/WITH
-        match = re.search(r"(SELECT|WITH)\s+.*?;?", text, re.DOTALL | re.IGNORECASE)
+        # 2. Try just code blocks without 'sql'
+        match = re.search(r"```\s*(SELECT|WITH|UPDATE|DELETE|INSERT).*?```", text, re.DOTALL | re.IGNORECASE)
         if match:
-            return match.group(0).strip()
+            return match.group(0).replace("```", "").strip()
+
+        # 3. Try raw SELECT/WITH (Greedier search)
+        # Look for SELECT until the next heading or end of text
+        match = re.search(r"(SELECT|WITH)[\s\S]+?(?=STATUS:|CORRECTION_PROMPT:|SUGGESTIONS:|$|```)", text, re.IGNORECASE)
+        if match:
+            sql = match.group(0).strip()
+            # Basic cleanup: remove trailing semicolons or markdown 
+            sql = sql.rstrip(";").strip()
+            return sql
             
         return None
+
+    def summarize_results(self, df_result: pd.DataFrame, original_query: str) -> str:
+        """
+        Takes the resulting dataframe and generates a natural language summary.
+        """
+        if df_result is None or df_result.empty:
+            return "I couldn't find any data matching your request."
+            
+        cols = df_result.columns.tolist()
+        
+        prompt = f"""
+You are a helpful Data Assistant speaking to a non-technical user.
+Answer their question clearly and concisely based ONLY on the provided data result. Do not mention SQL or technical jargon.
+
+User Question: {original_query}
+
+Data Result (Columns: {', '.join(cols)}):
+{df_result.head(10).to_markdown()}
+
+Provide a short, direct answer (1-3 sentences).
+"""
+        try:
+            response = self.model.generate_content(prompt)
+            return response.text.strip()
+        except Exception as e:
+            logger.warning(f"Failed to generate summary: {e}")
+            return "Here is the data you requested."
 
     def execute_query(self, sql: str, results_dict: dict[str, dict]) -> pd.DataFrame:
         """

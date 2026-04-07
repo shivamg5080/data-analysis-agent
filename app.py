@@ -229,7 +229,35 @@ if st.session_state.all_results:
         for i, turn in enumerate(st.session_state.ai_history):
             with st.chat_message("user"): st.write(turn["query"])
             with st.chat_message("assistant"):
-                if turn.get("full_text"): st.markdown(turn["full_text"])
+                # 1. Display Non-Technical Summary
+                if turn.get("summary"):
+                    st.markdown(f"#### 💡 Answer\n{turn['summary']}")
+                elif turn.get("full_text") and not turn.get("sql"):
+                    # If it's just a conversational response without data
+                    st.markdown(turn["full_text"])
+                
+                # 2. Display Visualization (if available)
+                if turn.get("df_result") is not None:
+                    if turn.get("viz") and turn["viz"].get("fig"):
+                        st.plotly_chart(turn["viz"]["fig"], use_container_width=True, key=f"viz_{i}")
+                        if turn["viz"].get("insight"):
+                            st.info(f"**Insight:** {turn['viz']['insight']}")
+
+                # 3. Technical Details (Collapsible)
+                if turn.get("sql") or turn.get("full_text"):
+                    with st.expander("🛠️ Technical Details (SQL & Reasoning)"):
+                        if turn.get("full_text"):
+                            # Filter out the SQL and Suggestions from full_text to avoid redundancy if possible, 
+                            # or just show it all if preferred. Here we show it all but clean.
+                            st.markdown(turn["full_text"])
+                        if turn.get("sql"):
+                            st.markdown("**Executed SQL:**")
+                            st.code(turn["sql"], language="sql")
+                        
+                        if turn.get("df_result") is not None:
+                            st.markdown("**Preview of Data:**")
+                            st.dataframe(turn["df_result"].head(10), use_container_width=True)
+
                 if turn.get("status") == "VERIFICATION_REQUIRED":
                     st.warning(turn.get("correction_prompt", "Verify mapping?"))
                     if st.button("✅ Yes", key=f"v_y_{i}"):
@@ -239,13 +267,12 @@ if st.session_state.all_results:
                             turn.update({"df_result": df_res, "viz": qe.generate_visualization(df_res, turn["query"]), "status": "SUCCESS"})
                             st.rerun()
                         except Exception as e: turn["error"] = str(e); st.rerun()
-                if turn.get("df_result") is not None:
-                    if turn.get("viz") and turn["viz"].get("fig"): st.plotly_chart(turn["viz"]["fig"], use_container_width=True)
-                    with st.expander("📄 Data"): st.dataframe(turn["df_result"], use_container_width=True)
                 
-                # Suggestions
+                # 4. Suggestions as buttons
                 sugs = turn.get("suggestions", [])
                 if sugs and i == len(st.session_state.ai_history) - 1:
+                    st.markdown("---")
+                    st.markdown("**Suggested next steps:**")
                     cols = st.columns(len(sugs))
                     for j, s in enumerate(sugs):
                         if cols[j].button(s, key=f"s_{i}_{j}"):
@@ -259,17 +286,24 @@ if st.session_state.all_results:
             if "pushed_query" in st.session_state: del st.session_state.pushed_query
             if st.button("🔍 Send") and q:
                 if st.session_state.qe_instance is None:
-                    from agent.query_engine import QueryEngine
-                    st.session_state.qe_instance = QueryEngine(api_key=api_key)
-                    st.session_state.qe_instance.start_chat(st.session_state.all_results)
+                    try:
+                        from agent.query_engine import QueryEngine
+                        st.session_state.qe_instance = QueryEngine(api_key=api_key)
+                        st.session_state.qe_instance.start_chat(st.session_state.all_results)
+                    except Exception as e:
+                        st.error(f"❌ AI Assistant Initialization Error: {e}")
+                        st.session_state.qe_instance = None
+                        st.stop()
                 
                 res = st.session_state.qe_instance.generate_sql(q)
-                new_turn = {"query": q, "sql": res["sql"], "full_text": res["full_text"], "status": res["status"], "correction_prompt": res["correction_prompt"], "suggestions": res["suggestions"], "df_result": None, "viz": None, "error": None}
+                new_turn = {"query": q, "sql": res["sql"], "full_text": res["full_text"], "status": res["status"], "correction_prompt": res["correction_prompt"], "suggestions": res["suggestions"], "df_result": None, "viz": None, "error": None, "summary": None}
                 
                 if new_turn["status"] == "SUCCESS" and new_turn["sql"]:
                     try:
                         df_res = st.session_state.qe_instance.execute_query(new_turn["sql"], st.session_state.all_results)
-                        new_turn.update({"df_result": df_res, "viz": st.session_state.qe_instance.generate_visualization(df_res, q)})
+                        viz = st.session_state.qe_instance.generate_visualization(df_res, q)
+                        summary = st.session_state.qe_instance.summarize_results(df_res, q)
+                        new_turn.update({"df_result": df_res, "viz": viz, "summary": summary})
                     except Exception as e: new_turn["error"] = str(e)
                 st.session_state.ai_history.append(new_turn)
                 st.rerun()
