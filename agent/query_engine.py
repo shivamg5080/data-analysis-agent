@@ -26,6 +26,7 @@ class QueryEngine:
             raise ValueError("Gemini API key is required for AI Query functionality.")
         
         genai.configure(api_key=api_key)
+        self.model_name = model_name
         self.model = genai.GenerativeModel(model_name)
         self.con = duckdb.connect(database=':memory:')
         self.chat = None
@@ -74,34 +75,45 @@ You are an expert Data Analyst and SQL Engineer. Your goal is to translate natur
 """
         # Start the chat session
         self.chat = None
-        models_to_try = [self.model.model_name, "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-pro"]
+        # Try specifically the requested model first, then fallbacks
+        models_to_try = [self.model_name, "gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-pro"]
         
         last_error = None
         for m_name in models_to_try:
             try:
-                # Remove 'models/' prefix if present for instantiation assdk will add it
                 clean_name = m_name.replace("models/", "")
+                logger.info(f"Attempting to initialize AI Assistant with model: {clean_name}")
                 self.model = genai.GenerativeModel(clean_name)
                 self.chat = self.model.start_chat(history=[])
+                # Test call with preamble
                 self.chat.send_message(f"SYSTEM INSTRUCTIONS:\n{system_instruction}\nPlease acknowledge and wait for the first user question.")
-                logger.info(f"Successfully initialized AI Assistant with model: {clean_name}")
-                break
+                self.model_name = clean_name # Store the working model name
+                logger.info(f"Successfully initialized AI Assistant with model: {self.model_name}")
+                return
             except Exception as e:
                 last_error = e
                 logger.warning(f"Failed to initialize AI Assistant with model {m_name}: {e}")
                 continue
         
-        if self.chat is None:
-            if "PermissionDenied" in str(last_error) or "403" in str(last_error):
-                raise PermissionError(
-                    "Google Generative AI: Permission Denied (403).\n"
-                    "Possible Fixes:\n"
-                    "1. Check if your Gemini API key is valid.\n"
-                    "2. Ensure the 'Generative Language API' is ENABLED in your Google Cloud Console for the associated project.\n"
-                    "3. Check for regional availability—some regions have limited access to certain models.\n"
-                    "4. If you recently restricted the key to specific APIs, ensure the Generative Language API is included."
-                ) from last_error
-            raise RuntimeError(f"Failed to initialize AI Assistant across all fallback models: {last_error}") from last_error
+        # If we reach here, all fallbacks failed
+        if "NotFound" in str(last_error) or "404" in str(last_error):
+             available = self.list_available_models()
+             raise RuntimeError(f"Model '{self.model_name}' not found. Available models in your account: {', '.join(available)}. Error: {last_error}")
+        
+        if "PermissionDenied" in str(last_error) or "403" in str(last_error):
+            raise PermissionError(
+                "Google Generative AI: Permission Denied (403). Check API key and project permissions."
+            ) from last_error
+            
+        raise RuntimeError(f"Failed to initialize AI Assistant: {last_error}")
+
+    @staticmethod
+    def list_available_models() -> list[str]:
+        """Lists models that support generateContent."""
+        try:
+            return [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        except:
+            return []
 
     def generate_sql(self, query: str, results_dict: dict = None) -> dict:
         """
