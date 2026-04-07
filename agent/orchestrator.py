@@ -180,6 +180,7 @@ def run_pipeline(
         "semantic": semantic_result,
         "analysis": analysis_result,
         "charts": charts,
+        "dataframe": df,
     }
     report_html = generate_report(pipeline_result, output_path=output_report_path)
     pipeline_result["report_html"] = report_html

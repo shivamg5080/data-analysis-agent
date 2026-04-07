@@ -161,7 +161,8 @@ if run_btn and uploaded_files:
                 progress_callback=on_progress,
                 api_key=api_key,
             )
-            table_name = os.path.splitext(file.name)[0].replace(" ", "_").replace(".", "_").replace("-", "_").lower()
+            import re
+            table_name = re.sub(r"[^a-zA-Z0-9]+", "_", os.path.splitext(file.name)[0]).lower().strip("_")
             result["table_name"] = table_name
             st.session_state.all_results[table_name] = result
             
