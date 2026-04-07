@@ -73,12 +73,26 @@ You are an expert Data Analyst and SQL Engineer. Your goal is to translate natur
 ---
 """
         # Start the chat session
-        self.chat = self.model.start_chat(history=[])
-        # Send the initial instructions as a preamble
-        try:
-            self.chat.send_message(f"SYSTEM INSTRUCTIONS:\n{system_instruction}\nPlease acknowledge and wait for the first user question.")
-        except Exception as e:
-            if "PermissionDenied" in str(e) or "403" in str(e):
+        self.chat = None
+        models_to_try = [self.model.model_name, "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-pro"]
+        
+        last_error = None
+        for m_name in models_to_try:
+            try:
+                # Remove 'models/' prefix if present for instantiation assdk will add it
+                clean_name = m_name.replace("models/", "")
+                self.model = genai.GenerativeModel(clean_name)
+                self.chat = self.model.start_chat(history=[])
+                self.chat.send_message(f"SYSTEM INSTRUCTIONS:\n{system_instruction}\nPlease acknowledge and wait for the first user question.")
+                logger.info(f"Successfully initialized AI Assistant with model: {clean_name}")
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Failed to initialize AI Assistant with model {m_name}: {e}")
+                continue
+        
+        if self.chat is None:
+            if "PermissionDenied" in str(last_error) or "403" in str(last_error):
                 raise PermissionError(
                     "Google Generative AI: Permission Denied (403).\n"
                     "Possible Fixes:\n"
@@ -86,8 +100,8 @@ You are an expert Data Analyst and SQL Engineer. Your goal is to translate natur
                     "2. Ensure the 'Generative Language API' is ENABLED in your Google Cloud Console for the associated project.\n"
                     "3. Check for regional availability—some regions have limited access to certain models.\n"
                     "4. If you recently restricted the key to specific APIs, ensure the Generative Language API is included."
-                ) from e
-            raise RuntimeError(f"Failed to initialize AI Assistant: {e}") from e
+                ) from last_error
+            raise RuntimeError(f"Failed to initialize AI Assistant across all fallback models: {last_error}") from last_error
 
     def generate_sql(self, query: str, results_dict: dict = None) -> dict:
         """

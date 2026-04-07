@@ -87,6 +87,13 @@ with st.sidebar:
     )
     api_key = api_key_input if api_key_input else secret_key
 
+    selected_model = st.selectbox(
+        "Model Version",
+        options=["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro", "gemini-1.0-pro"],
+        index=0,
+        help="Choose the model version. 1.5 Flash is recommended for speed and cost. If you get a 404 error, try gemini-pro or gemini-1.5-flash-latest."
+    )
+
     st.markdown("---")
     st.markdown("### 📋 Pipeline Log")
     log_placeholder = st.empty()
@@ -288,7 +295,7 @@ if st.session_state.all_results:
                 if st.session_state.qe_instance is None:
                     try:
                         from agent.query_engine import QueryEngine
-                        st.session_state.qe_instance = QueryEngine(api_key=api_key)
+                        st.session_state.qe_instance = QueryEngine(api_key=api_key, model_name=selected_model)
                         st.session_state.qe_instance.start_chat(st.session_state.all_results)
                     except Exception as e:
                         st.error(f"❌ AI Assistant Initialization Error: {e}")
