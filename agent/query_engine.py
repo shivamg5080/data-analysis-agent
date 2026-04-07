@@ -137,19 +137,28 @@ You are an expert Data Analyst and SQL Engineer. Your goal is to translate natur
         res = {
             "sql": self._extract_sql(text),
             "full_text": text,
+            "explanation": "",
             "status": "SUCCESS",
             "correction_prompt": None,
             "suggestions": []
         }
 
+        # Extract Explanation
+        exp_match = re.search(r"EXPLANATION:\s*(.*?)(?=SQL:|STATUS:|CORRECTION_PROMPT:|SUGGESTIONS:|```|$)", text, re.DOTALL | re.IGNORECASE)
+        if exp_match:
+            res["explanation"] = exp_match.group(1).strip()
+
+        # Extract Status
         status_match = re.search(r"STATUS:\s*(VERIFICATION_REQUIRED|SUCCESS)", text, re.IGNORECASE)
         if status_match:
             res["status"] = status_match.group(1).upper()
 
+        # Extract Correction Prompt
         cp_match = re.search(r"CORRECTION_PROMPT:\s*(.*)", text, re.IGNORECASE)
         if cp_match:
             res["correction_prompt"] = cp_match.group(1).strip()
 
+        # Extract Suggestions
         sug_match = re.search(r"SUGGESTIONS:\s*(.*)", text, re.DOTALL | re.IGNORECASE)
         if sug_match:
             s_list = sug_match.group(1).strip().split("\n")

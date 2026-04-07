@@ -242,53 +242,61 @@ if st.session_state.all_results:
         for i, turn in enumerate(st.session_state.ai_history):
             with st.chat_message("user"): st.write(turn["query"])
             with st.chat_message("assistant"):
-                # 1. Display Non-Technical Summary
+
+                # 1. Plain-English Summary (ALWAYS show something)
                 if turn.get("summary"):
-                    st.markdown(f"#### 💡 Answer\n{turn['summary']}")
+                    st.success(turn["summary"])
+                elif turn.get("df_result") is not None:
+                    # Fallback: basic count summary if AI summary failed
+                    n = len(turn["df_result"])
+                    st.success(f"Found **{n} record(s)** matching your query.")
+                elif turn.get("error"):
+                    st.error(f"❌ Could not retrieve data: {turn['error']}")
                 elif turn.get("full_text") and not turn.get("sql"):
-                    # If it's just a conversational response without data
-                    st.markdown(turn["full_text"])
-                
-                # 2. Display Visualization (if available)
+                    # Pure conversational response with no data
+                    st.info(turn["full_text"])
+
+                # 2. Visualization — right after the summary
                 if turn.get("df_result") is not None:
                     if turn.get("viz") and turn["viz"].get("fig"):
                         st.plotly_chart(turn["viz"]["fig"], use_container_width=True, key=f"viz_{i}")
                         if turn["viz"].get("insight"):
-                            st.info(f"**Insight:** {turn['viz']['insight']}")
+                            st.caption(f"📌 {turn['viz']['insight']}")
+                    else:
+                        # Show a compact dataframe if visualization failed
+                        st.dataframe(turn["df_result"].head(20), use_container_width=True)
 
-                # 3. Technical Details (Collapsible)
-                if turn.get("sql") or turn.get("full_text"):
-                    with st.expander("🛠️ Technical Details (SQL & Reasoning)"):
-                        if turn.get("full_text"):
-                            # Filter out the SQL and Suggestions from full_text to avoid redundancy if possible, 
-                            # or just show it all if preferred. Here we show it all but clean.
-                            st.markdown(turn["full_text"])
-                        if turn.get("sql"):
-                            st.markdown("**Executed SQL:**")
-                            st.code(turn["sql"], language="sql")
-                        
-                        if turn.get("df_result") is not None:
-                            st.markdown("**Preview of Data:**")
-                            st.dataframe(turn["df_result"].head(10), use_container_width=True)
+                # 3. Technical Details — collapsed by default
+                if turn.get("sql"):
+                    with st.expander("🛠️ Technical Details (SQL & Reasoning)", expanded=False):
+                        if turn.get("explanation"):
+                            st.markdown(f"**Reasoning:** {turn['explanation']}")
+                        st.markdown("**SQL Query:**")
+                        st.code(turn["sql"], language="sql")
 
+                # Verification flow
                 if turn.get("status") == "VERIFICATION_REQUIRED":
-                    st.warning(turn.get("correction_prompt", "Verify mapping?"))
-                    if st.button("✅ Yes", key=f"v_y_{i}"):
+                    st.warning(turn.get("correction_prompt", "Please verify the column mapping."))
+                    if st.button("✅ Yes, proceed", key=f"v_y_{i}"):
                         try:
                             qe = st.session_state.qe_instance
                             df_res = qe.execute_query(turn["sql"], st.session_state.all_results)
-                            turn.update({"df_result": df_res, "viz": qe.generate_visualization(df_res, turn["query"]), "status": "SUCCESS"})
+                            viz = qe.generate_visualization(df_res, turn["query"])
+                            smry = qe.summarize_results(df_res, turn["query"])
+                            turn.update({"df_result": df_res, "viz": viz, "summary": smry, "status": "SUCCESS"})
                             st.rerun()
-                        except Exception as e: turn["error"] = str(e); st.rerun()
-                
-                # 4. Suggestions as buttons
+                        except Exception as e:
+                            turn["error"] = str(e)
+                            st.rerun()
+
+                # 4. Suggestion buttons (only for latest turn)
                 sugs = turn.get("suggestions", [])
                 if sugs and i == len(st.session_state.ai_history) - 1:
-                    st.markdown("---")
-                    st.markdown("**Suggested next steps:**")
-                    cols = st.columns(len(sugs))
+                    st.divider()
+                    st.caption("**💬 Suggested follow-ups:**")
+                    cols = st.columns(min(len(sugs), 3))
                     for j, s in enumerate(sugs):
-                        if cols[j].button(s, key=f"s_{i}_{j}"):
+                        if cols[j % 3].button(s, key=f"s_{i}_{j}", use_container_width=True):
                             st.session_state.pushed_query = s
                             st.rerun()
 
@@ -309,15 +317,42 @@ if st.session_state.all_results:
                         st.stop()
                 
                 res = st.session_state.qe_instance.generate_sql(q)
-                new_turn = {"query": q, "sql": res["sql"], "full_text": res["full_text"], "status": res["status"], "correction_prompt": res["correction_prompt"], "suggestions": res["suggestions"], "df_result": None, "viz": None, "error": None, "summary": None}
-                
+                new_turn = {
+                    "query": q,
+                    "sql": res.get("sql"),
+                    "full_text": res.get("full_text", ""),
+                    "explanation": res.get("explanation", ""),
+                    "status": res.get("status", "SUCCESS"),
+                    "correction_prompt": res.get("correction_prompt"),
+                    "suggestions": res.get("suggestions", []),
+                    "df_result": None,
+                    "viz": None,
+                    "error": None,
+                    "summary": None,
+                }
+
                 if new_turn["status"] == "SUCCESS" and new_turn["sql"]:
+                    # Step 1: Execute SQL
                     try:
                         df_res = st.session_state.qe_instance.execute_query(new_turn["sql"], st.session_state.all_results)
-                        viz = st.session_state.qe_instance.generate_visualization(df_res, q)
-                        summary = st.session_state.qe_instance.summarize_results(df_res, q)
-                        new_turn.update({"df_result": df_res, "viz": viz, "summary": summary})
-                    except Exception as e: new_turn["error"] = str(e)
+                        new_turn["df_result"] = df_res
+                    except Exception as e:
+                        new_turn["error"] = str(e)
+
+                    # Step 2: Generate plain-English summary (independent of viz)
+                    if new_turn["df_result"] is not None:
+                        try:
+                            new_turn["summary"] = st.session_state.qe_instance.summarize_results(new_turn["df_result"], q)
+                        except Exception:
+                            new_turn["summary"] = None  # fallback shown in UI
+
+                    # Step 3: Generate visualization (independent of summary)
+                    if new_turn["df_result"] is not None:
+                        try:
+                            new_turn["viz"] = st.session_state.qe_instance.generate_visualization(new_turn["df_result"], q)
+                        except Exception:
+                            new_turn["viz"] = None  # fallback shown in UI
+
                 st.session_state.ai_history.append(new_turn)
                 st.rerun()
 
