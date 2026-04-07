@@ -78,6 +78,7 @@ def run_pipeline(
     config_path: str | None = None,
     output_report_path: str | None = None,
     progress_callback=None,
+    api_key: str | None = None,
 ) -> dict[str, Any]:
     """
     Execute the full analysis pipeline.
@@ -152,7 +153,7 @@ def run_pipeline(
     # ---- 5. Analysis --------------------------------------------------------
     step(5, TOTAL_STEPS, "Running automated statistical analysis…")
     analysis_result = run_analysis(
-        df, column_types, semantic_result, analysis_columns, config=config
+        df, column_types, semantic_result, analysis_columns, config=config, api_key=api_key
     )
 
     # ---- 6. Visualizations --------------------------------------------------

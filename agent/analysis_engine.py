@@ -28,6 +28,7 @@ def run_analysis(
     semantic_layer: dict[str, Any],
     analysis_columns: list[str],
     config: dict | None = None,
+    api_key: str | None = None,
 ) -> dict[str, Any]:
     """
     Run the full automated analysis pipeline.
@@ -42,6 +43,7 @@ def run_analysis(
         - ``segment_analyses``    : list[dict]
         - ``insights``            : list[dict]
         - ``confidence_score``    : float
+        - ``narrative_summary``   : str | None
     """
     cfg = (config or {}).get("analysis", {})
     top_n: int = cfg.get("top_n_categories", 15)
@@ -91,7 +93,12 @@ def run_analysis(
         column_types, measure_cols, dimension_cols, time_cols, config
     )
 
-    # ---- 7. Confidence score -----------------------------------------------
+    # ---- 7. Narrative Summary (AI) -----------------------------------------
+    narrative_summary = None
+    if api_key:
+        narrative_summary = _generate_narrative_summary(api_key, insights, dataset_summary)
+
+    # ---- 8. Confidence score -----------------------------------------------
     confidence = _compute_confidence(df, column_analyses, insights)
 
     logger.info("Analysis complete. %d insights generated.", len(insights))
@@ -104,7 +111,37 @@ def run_analysis(
         "segment_analyses": segment_analyses,
         "insights": insights,
         "confidence_score": confidence,
+        "narrative_summary": narrative_summary,
     }
+
+
+def _generate_narrative_summary(api_key: str, insights: list[dict], summary: dict) -> str | None:
+    """Uses Gemini to create a cohesive narrative for non-tech stakeholders."""
+    try:
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        
+        insights_text = "\n".join([f"- {i['title']}: {i['detail']}" for i in insights[:12]])
+        
+        prompt = f"""You are a senior data consultant. Write a concise, professional Executive Summary 
+for a non-technical stakeholder based on the following data insights.
+
+Context: Dataset has {summary['rows']:,} rows and {summary['columns']} columns.
+Key Findings:
+{insights_text}
+
+Rules:
+1. Write 2-3 short, impactful paragraphs.
+2. Focus on the 'So What?' — what do these numbers mean for the business?
+3. Use a friendly, professional tone.
+4. Do NOT use markdown headings (#). Use bold text for emphasis.
+5. End with a one-sentence 'Next Steps' recommendation.
+"""
+        response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+        return response.text.strip()
+    except Exception as e:
+        logger.warning("Failed to generate narrative summary: %s", e)
+        return None
 
 
 # ---------------------------------------------------------------------------

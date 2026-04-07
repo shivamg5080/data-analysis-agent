@@ -159,8 +159,9 @@ if run_btn and uploaded_files:
                 file=file_bytes,
                 filename=file.name,
                 progress_callback=on_progress,
+                api_key=api_key,
             )
-            table_name = os.path.splitext(file.name)[0].replace(" ", "_").replace(".", "_").lower()
+            table_name = os.path.splitext(file.name)[0].replace(" ", "_").replace(".", "_").replace("-", "_").lower()
             result["table_name"] = table_name
             st.session_state.all_results[table_name] = result
             
@@ -189,53 +190,44 @@ if st.session_state.all_results:
         result.get("metadata", {}), result.get("schema", {}), result.get("quality", {}), \
         result.get("semantic", {}), result.get("analysis", {}), result.get("charts", []), result.get("report_html", "")
 
-    tabs = st.tabs(["📋 Quality", "🗂️ Schema", "🧠 Semantic", "📈 Insights", "📊 Charts", "💬 AI Assistant", "📥 Report"])
+    tabs = st.tabs(["🏠 Summary", "📈 Insights", "📊 Charts", "💬 AI Assistant", "📋 Quality", "🗂️ Schema", "📥 Report"])
 
     with tabs[0]:
-        st.subheader("Data Quality")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Rows", f"{meta.get('rows_raw', 0):,}")
-        col2.metric("Columns", len(schema.get("analysis_columns", [])))
-        col3.metric("Quality Score", f"{int(quality.get('summary', {}).get('score', 0))}%")
+        st.subheader("Executive Summary")
+        narrative = result.get("analysis", {}).get("narrative_summary")
+        if narrative:
+            st.markdown(f"<div style='background:white; padding:1.5rem; border-radius:12px; border-left:5px solid #2d6a9f; box-shadow: 0 2px 10px rgba(0,0,0,0.05); margin-bottom:1.5rem;'>{narrative}</div>", unsafe_allow_html=True)
+        else:
+            st.info("AI Narrative summary is only available when a Gemini API key is provided.")
         
-        for issue in quality.get("issues", [])[:5]:
-            st.warning(f"⚠️ **{issue.get('column', 'N/A')}**: {issue.get('issue', 'Issue')}")
+        # Mini metrics row
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Rows", f"{meta.get('rows_raw', 0):,}")
+        col2.metric("Analysis Cols", len(schema.get("analysis_columns", [])))
+        col3.metric("Quality Score", f"{int(quality.get('summary', {}).get('score', 0))}%")
+        col4.metric("Insights Found", len(analysis.get("insights", [])))
 
     with tabs[1]:
-        st.subheader("Schema / Data Dictionary")
-        st.dataframe(pd.DataFrame(schema.get("data_dictionary", [])), use_container_width=True)
+        st.subheader("Key Insights")
+        for ins in analysis.get("insights", []):
+            st.markdown(f"<div class='insight-box p{ins.get('priority',3)}'><strong>{ins.get('title')}</strong><br/>{ins.get('insight', ins.get('detail', ''))}</div>", unsafe_allow_html=True)
 
     with tabs[2]:
-        st.subheader("Business Semantic Layer")
-        def _show_sem(title, items):
-            if items:
-                st.markdown(f"**{title}**")
-                cols = st.columns(min(len(items), 4))
-                for i, item in enumerate(items):
-                    cols[i%4].info(item.get("raw_column", str(item)))
-        _show_sem("📍 Dimensions", semantic.get("dimensions", []))
-        _show_sem("🔢 Measures", semantic.get("measures", []))
-
-    with tabs[3]:
-        st.subheader("Insights")
-        for ins in analysis.get("insights", []):
-            st.markdown(f"<div class='insight-box p{ins.get('priority',3)}'><strong>{ins.get('title')}</strong><br/>{ins.get('insight', '')}</div>", unsafe_allow_html=True)
-
-    with tabs[4]:
-        st.subheader("Visualizations")
+        st.subheader("Interactive Visualizations")
         for i, chart in enumerate(charts):
             with st.expander(f"📊 {chart.get('title', f'Chart {i+1}')}"):
                 st.plotly_chart(chart["fig"], use_container_width=True, key=f"chart_{i}_{selected_table}")
+                st.caption(f"💡 **Insight:** {chart.get('insight')}")
 
-    # ---- Tab 6: AI Assistant ----------------------------------------------
-    with tabs[5]:
+    # ---- Tab 4: AI Assistant ----------------------------------------------
+    with tabs[3]:
         st.subheader("💬 AI Data Assistant")
-        st.markdown(f"Ask questions across **{len(st.session_state.all_results)} active datasets**.")
+        st.markdown(f"Ask plain-English questions about your data.")
         
         if "ai_history" not in st.session_state: st.session_state.ai_history = []
         if "qe_instance" not in st.session_state: st.session_state.qe_instance = None
 
-        if st.button("🗑️ Reset"):
+        if st.button("🗑️ Clear Chat"):
             st.session_state.ai_history, st.session_state.qe_instance = [], None
             st.rerun()
 
@@ -243,36 +235,35 @@ if st.session_state.all_results:
             with st.chat_message("user"): st.write(turn["query"])
             with st.chat_message("assistant"):
 
-                # 1. Plain-English Summary (ALWAYS show something)
+                # 1. Plain-English Summary
                 if turn.get("summary"):
-                    st.success(turn["summary"])
+                    st.markdown(f"<div style='background:#f0f7ff; padding:1rem; border-radius:10px; border:1px solid #d1e3ff; margin-bottom:1rem;'>{turn['summary']}</div>", unsafe_allow_html=True)
                 elif turn.get("df_result") is not None:
-                    # Fallback: basic count summary if AI summary failed
                     n = len(turn["df_result"])
-                    st.success(f"Found **{n} record(s)** matching your query.")
+                    st.success(f"I found **{n} records** matching your request.")
                 elif turn.get("error"):
-                    st.error(f"❌ Could not retrieve data: {turn['error']}")
+                    st.error(f"❌ Error: {turn['error']}")
                 elif turn.get("full_text") and not turn.get("sql"):
-                    # Pure conversational response with no data
                     st.info(turn["full_text"])
 
-                # 2. Visualization — right after the summary
+                # 2. Visualization
                 if turn.get("df_result") is not None:
                     if turn.get("viz") and turn["viz"].get("fig"):
                         st.plotly_chart(turn["viz"]["fig"], use_container_width=True, key=f"viz_{i}")
                         if turn["viz"].get("insight"):
                             st.caption(f"📌 {turn['viz']['insight']}")
                     else:
-                        # Show a compact dataframe if visualization failed
-                        st.dataframe(turn["df_result"].head(20), use_container_width=True)
+                        st.dataframe(turn["df_result"].head(10), use_container_width=True)
 
-                # 3. Technical Details — collapsed by default
-                if turn.get("sql"):
-                    with st.expander("🛠️ Technical Details (SQL & Reasoning)", expanded=False):
-                        if turn.get("explanation"):
-                            st.markdown(f"**Reasoning:** {turn['explanation']}")
-                        st.markdown("**SQL Query:**")
+                # 3. Technical Details (Collapsed)
+                with st.expander("🛠️ Show SQL & Reasoning", expanded=False):
+                    if turn.get("explanation"):
+                        st.markdown(f"**Analysis Reasoning:** {turn['explanation']}")
+                    if turn.get("sql"):
                         st.code(turn["sql"], language="sql")
+                    if turn.get("df_result") is not None:
+                        st.markdown("**Data Preview (first 5 rows):**")
+                        st.dataframe(turn["df_result"].head(5))
 
                 # Verification flow
                 if turn.get("status") == "VERIFICATION_REQUIRED":
@@ -332,29 +323,25 @@ if st.session_state.all_results:
                 }
 
                 if new_turn["status"] == "SUCCESS" and new_turn["sql"]:
-                    # Step 1: Execute SQL
                     try:
                         df_res = st.session_state.qe_instance.execute_query(new_turn["sql"], st.session_state.all_results)
                         new_turn["df_result"] = df_res
+                        new_turn["summary"] = st.session_state.qe_instance.summarize_results(df_res, q)
+                        new_turn["viz"] = st.session_state.qe_instance.generate_visualization(df_res, q)
                     except Exception as e:
                         new_turn["error"] = str(e)
 
-                    # Step 2: Generate plain-English summary (independent of viz)
-                    if new_turn["df_result"] is not None:
-                        try:
-                            new_turn["summary"] = st.session_state.qe_instance.summarize_results(new_turn["df_result"], q)
-                        except Exception:
-                            new_turn["summary"] = None  # fallback shown in UI
-
-                    # Step 3: Generate visualization (independent of summary)
-                    if new_turn["df_result"] is not None:
-                        try:
-                            new_turn["viz"] = st.session_state.qe_instance.generate_visualization(new_turn["df_result"], q)
-                        except Exception:
-                            new_turn["viz"] = None  # fallback shown in UI
-
                 st.session_state.ai_history.append(new_turn)
                 st.rerun()
+
+    with tabs[4]:
+        st.subheader("Data Quality Checks")
+        for issue in quality.get("issues", [])[:10]:
+            st.warning(f"⚠️ **{issue.get('column', 'N/A')}**: {issue.get('issue', 'Issue')}")
+
+    with tabs[5]:
+        st.subheader("Data Dictionary")
+        st.dataframe(pd.DataFrame(schema.get("data_dictionary", [])), use_container_width=True)
 
     with tabs[6]:
         st.subheader("Download Report")

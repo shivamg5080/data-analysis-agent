@@ -44,33 +44,35 @@ class QueryEngine:
 
         for table_name, result in results_dict.items():
             schema_desc = self._build_schema_context(result.get("semantic", {}))
-            all_schemas.append(f"TABLE: '{table_name}'\n{schema_desc}\n")
+            filename = result.get("metadata", {}).get("filename", table_name)
+            all_schemas.append(f"CRITICAL: YOU MUST USE THIS EXACT TABLE NAME IN SQL: \"{table_name}\" (File: {filename})\n{schema_desc}\n")
 
         full_schema_context = "\n---\n".join(all_schemas)
 
         system_instruction = f"""
-You are an expert Data Analyst and SQL Engineer. Your goal is to translate natural language into SQL for the following tables: {', '.join(self.table_names)}.
+You are an expert Data Analyst. Your goal is to translate natural language into SQL for the following tables: {', '.join(self.table_names)}.
 
 --- SCHEMA CONTEXT (ALL TABLES) ---
 {full_schema_context}
 ---
 
 --- CRITICAL RULES ---
-1. **MULTI-TABLE JOINS**: If the query spans multiple tables, use standard SQL JOINs with the correct table names.
-2. **STRICT COLUMN ADHERENCE**: Use ONLY the exact 'raw_column' names listed.
-3. **VERIFICATION**: If you are unsure about a column mapping, STOP and output a 'VERIFICATION_REQUIRED' block.
-4. **SQL FORMATTING**: ALWAYS wrap your SQL code in a markdown block like this:
+1. **EXACT TABLE NAMES**: You MUST use the exact table names provided (e.g., "{self.table_names[0]}"). Do NOT look at the file name or try to "fix" the table name.
+2. **QUOTING**: ALWAYS enclose all table names and column names in double quotes (e.g., `"table_name"`, `"column_name"`). This is mandatory to avoid errors with hyphens or spaces.
+3. **STRICT COLUMN ADHERENCE**: Use ONLY the exact 'raw_column' names listed in the schema.
+4. **NON-TECH FRIENDLY**: Your EXPLANATION should be simple. Avoid talking about JOINs or GROUP BYs in the explanation; instead, talk about what the data represents.
+5. **SQL FORMATTING**: Wrap SQL code in a markdown block:
    ```sql
-   SELECT * FROM table...
+   SELECT ...
    ```
-5. **SUGGESTIONS**: After every successful SQL generation, provide 2-3 'SMART_SUGGESTIONS' for the next logical query.
-6. Use standard SQL compatible with DuckDB.
-7. The response MUST follow this structured format:
-   EXPLANATION: [Brief technical reasoning]
+6. **SUGGESTIONS**: Provide 2-3 logical follow-up questions.
+7. Use standard SQL compatible with DuckDB.
+8. Follow this format:
+   EXPLANATION: [Business-friendly reasoning]
    SQL: [The SQL code block]
    STATUS: [SUCCESS or VERIFICATION_REQUIRED]
-   CORRECTION_PROMPT: [If VERIFICATION_REQUIRED, the question to ask the user]
-   SUGGESTIONS: [List of 2-3 suggested follow-up questions]
+   CORRECTION_PROMPT: [If needed]
+   SUGGESTIONS: [Follow-up questions]
 ---
 """
         preamble = f"SYSTEM INSTRUCTIONS:\n{system_instruction}\nPlease acknowledge and wait for the first user question."
@@ -186,17 +188,66 @@ You are an expert Data Analyst and SQL Engineer. Your goal is to translate natur
         return None
 
     def execute_query(self, sql: str, results_dict: dict) -> pd.DataFrame:
-        """Executes a SQL query against ALL provided DataFrames using DuckDB."""
+        """
+        Executes a SQL query against ALL provided DataFrames using DuckDB.
+        If the query fails due to a wrong table name (e.g. hyphens vs underscores),
+        it automatically corrects the table name and retries once.
+        """
+        registered_tables = []
         for table_name, result in results_dict.items():
             df = result.get("dataframe")
             if df is not None:
                 self.con.register(table_name, df)
+                registered_tables.append(table_name)
 
         try:
             return self.con.execute(sql).df()
         except Exception as e:
-            logger.error(f"SQL execution failed: {e}")
-            raise RuntimeError(f"Error executing SQL: {e}")
+            error_str = str(e)
+            logger.warning(f"SQL execution failed (attempt 1): {error_str}")
+
+            # --- Auto-correct wrong table names ---
+            # Normalise by collapsing all separators to nothing for fuzzy matching
+            def _norm(s: str) -> str:
+                return re.sub(r"[^a-z0-9]", "", s.lower())
+
+            corrected_sql = sql
+            made_correction = False
+            for reg_table in registered_tables:
+                # Find any quoted or unquoted token in the SQL that looks like
+                # a table name but has wrong separators (hyphens vs underscores)
+                pattern = re.compile(
+                    r'"([^"]+)"|(?<!\w)(' + re.escape(reg_table.replace("_", "-")) + r')(?!\w)',
+                    re.IGNORECASE
+                )
+                for m in pattern.finditer(sql):
+                    candidate = m.group(1) or m.group(2)
+                    if candidate and _norm(candidate) == _norm(reg_table) and candidate != reg_table:
+                        corrected_sql = corrected_sql.replace(
+                            f'"{candidate}"', f'"{reg_table}"'
+                        ).replace(candidate, f'"{reg_table}"')
+                        made_correction = True
+                        logger.info(f"Auto-corrected table name: '{candidate}' → '{reg_table}'")
+
+            # Also do a broader replacement: any quoted string whose normalised
+            # form matches a registered table
+            quoted_names = re.findall(r'"([^"]+)"', sql)
+            for qname in quoted_names:
+                for reg_table in registered_tables:
+                    if _norm(qname) == _norm(reg_table) and qname != reg_table:
+                        corrected_sql = corrected_sql.replace(f'"{qname}"', f'"{reg_table}"')
+                        made_correction = True
+                        logger.info(f"Auto-corrected quoted table name: '{qname}' → '{reg_table}'")
+
+            if made_correction:
+                try:
+                    logger.info(f"Retrying with corrected SQL: {corrected_sql}")
+                    return self.con.execute(corrected_sql).df()
+                except Exception as e2:
+                    logger.error(f"SQL execution failed after correction: {e2}")
+                    raise RuntimeError(f"Error executing SQL: {e2}")
+
+            raise RuntimeError(f"Error executing SQL: {error_str}")
 
     def summarize_results(self, df_result: pd.DataFrame, original_query: str) -> str:
         """
