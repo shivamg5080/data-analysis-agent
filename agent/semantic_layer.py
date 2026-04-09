@@ -72,6 +72,13 @@ HR_SEMANTIC_OVERRIDES: dict[str, dict[str, Any]] = {
         "allowed_operations": ["filter", "group_by_month", "group_by_quarter", "group_by_year"],
         "related_columns": ["date_of_exit", "final_exit_type", "final_reason_of_exit"],
     },
+    "date_of_exit": {
+        "type": SEM_TIME,
+        "description": "Official exit/termination date",
+        "synonyms": ["exit date", "separation date", "termination date"],
+        "allowed_operations": ["filter", "group_by_month", "group_by_year"],
+        "related_columns": ["lwd", "final_exit_type"],
+    },
     "endofmonth": {
         "type": SEM_TIME,
         "description": "Month-end snapshot date for headcount",
@@ -82,7 +89,7 @@ HR_SEMANTIC_OVERRIDES: dict[str, dict[str, Any]] = {
     "newhireflag": {
         "type": SEM_DIMENSION,
         "description": "Flag for new hires in snapshot period",
-        "synonyms": ["new hire", "new joiner", "recent hire"],
+        "synonyms": ["new hire", "new joiner", "recent hire", "joined this month"],
         "allowed_operations": ["filter", "group"],
         "related_columns": ["date_of_joining"],
     },
@@ -100,6 +107,27 @@ HR_SEMANTIC_OVERRIDES: dict[str, dict[str, Any]] = {
         "allowed_operations": ["filter", "group"],
         "related_columns": ["grade"],
     },
+    "employeetype": {
+        "type": SEM_DIMENSION,
+        "description": "Employment type (Full Time/Contract)",
+        "synonyms": ["employee type", "worker type", "fte/contract"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["empstatus"],
+    },
+    "ic_pm": {
+        "type": SEM_DIMENSION,
+        "description": "Role type: Individual Contributor vs People Manager",
+        "synonyms": ["ic/pm", "individual contributor", "people manager"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["manager_id"],
+    },
+    "emprating": {
+        "type": SEM_DIMENSION,
+        "description": "Performance rating",
+        "synonyms": ["rating", "performance rating", "appraisal"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["empstatus"],
+    },
     "gender": {
         "type": SEM_DIMENSION,
         "description": "Gender of employee",
@@ -107,19 +135,40 @@ HR_SEMANTIC_OVERRIDES: dict[str, dict[str, Any]] = {
         "allowed_operations": ["filter", "group"],
         "related_columns": [],
     },
+    "manager": {
+        "type": SEM_DIMENSION,
+        "description": "Manager display name with id",
+        "synonyms": ["manager", "supervisor", "reporting manager"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["manager_id", "manager_name"],
+    },
     "manager_id": {
         "type": SEM_ENTITY,
         "description": "Manager employee ID for team roll-up",
-        "synonyms": ["manager id", "supervisor id", "lead id"],
+        "synonyms": ["manager id", "supervisor id", "lead id", "team lead id"],
         "allowed_operations": ["filter", "group"],
         "related_columns": ["manager_name", "manageremail", "empid"],
     },
     "manager_name": {
         "type": SEM_DIMENSION,
         "description": "Manager name",
-        "synonyms": ["manager", "supervisor name"],
+        "synonyms": ["manager", "supervisor name", "team lead"],
         "allowed_operations": ["filter", "group"],
         "related_columns": ["manager_id"],
+    },
+    "manageremail": {
+        "type": SEM_DIMENSION,
+        "description": "Manager email address",
+        "synonyms": ["manager email", "supervisor email"],
+        "allowed_operations": ["filter"],
+        "related_columns": ["manager_id", "manager_name"],
+    },
+    "functional role": {
+        "type": SEM_DIMENSION,
+        "description": "Functional role / job title",
+        "synonyms": ["role", "job role", "designation", "position"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["department", "sub department"],
     },
     "department": {
         "type": SEM_DIMENSION,
@@ -149,6 +198,41 @@ HR_SEMANTIC_OVERRIDES: dict[str, dict[str, Any]] = {
         "allowed_operations": ["filter", "group"],
         "related_columns": ["lob", "cxo"],
     },
+    "cxo": {
+        "type": SEM_DIMENSION,
+        "description": "CXO / executive owner of group",
+        "synonyms": ["cxo", "executive sponsor", "business head"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["cxo_emp_id"],
+    },
+    "cxo_emp_id": {
+        "type": SEM_ENTITY,
+        "description": "CXO employee ID",
+        "synonyms": ["cxo id", "executive id"],
+        "allowed_operations": ["filter"],
+        "related_columns": ["cxo"],
+    },
+    "hrbpname": {
+        "type": SEM_DIMENSION,
+        "description": "HRBP name",
+        "synonyms": ["hrbp", "hr business partner", "people partner"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["hrbpempid", "hrbpemail"],
+    },
+    "hrbpemail": {
+        "type": SEM_DIMENSION,
+        "description": "HRBP email",
+        "synonyms": ["hrbp email", "hr partner email"],
+        "allowed_operations": ["filter"],
+        "related_columns": ["hrbpname"],
+    },
+    "hrbpempid": {
+        "type": SEM_ENTITY,
+        "description": "HRBP employee ID",
+        "synonyms": ["hrbp id", "hr partner id"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["hrbpname"],
+    },
     "final_reason_of_exit": {
         "type": SEM_DIMENSION,
         "description": "Final standardized exit reason",
@@ -162,6 +246,62 @@ HR_SEMANTIC_OVERRIDES: dict[str, dict[str, Any]] = {
         "synonyms": ["attrition type", "exit category", "voluntary/involuntary"],
         "allowed_operations": ["filter", "group"],
         "related_columns": ["final_reason_of_exit"],
+    },
+    "employee_reason_of_exit": {
+        "type": SEM_DIMENSION,
+        "description": "Exit reason reported by employee",
+        "synonyms": ["employee exit reason", "self-reported reason"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["final_reason_of_exit"],
+    },
+    "emp_type_of_exit": {
+        "type": SEM_DIMENSION,
+        "description": "Exit type reported by employee",
+        "synonyms": ["employee exit type", "self exit type"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["final_exit_type"],
+    },
+    "manager_reason_of_exit": {
+        "type": SEM_DIMENSION,
+        "description": "Exit reason reported by manager",
+        "synonyms": ["manager exit reason"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["final_reason_of_exit"],
+    },
+    "manager_type_of_exit": {
+        "type": SEM_DIMENSION,
+        "description": "Exit type reported by manager",
+        "synonyms": ["manager exit type"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["final_exit_type"],
+    },
+    "hrbp_reason_of_exit": {
+        "type": SEM_DIMENSION,
+        "description": "Exit reason validated by HRBP",
+        "synonyms": ["hrbp exit reason"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["final_reason_of_exit"],
+    },
+    "hrbp_type_of_exit": {
+        "type": SEM_DIMENSION,
+        "description": "Exit type validated by HRBP",
+        "synonyms": ["hrbp exit type"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["final_exit_type"],
+    },
+    "er_reason_of_exit": {
+        "type": SEM_DIMENSION,
+        "description": "Employee relations exit reason",
+        "synonyms": ["er exit reason", "employee relations reason"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["final_reason_of_exit"],
+    },
+    "er_type_of_exit": {
+        "type": SEM_DIMENSION,
+        "description": "Employee relations exit type",
+        "synonyms": ["er exit type"],
+        "allowed_operations": ["filter", "group"],
+        "related_columns": ["final_exit_type"],
     },
     "tenure_bucket": {
         "type": SEM_DIMENSION,
@@ -203,6 +343,10 @@ HR_QUERY_PATTERNS = [
         "maps_to": "Leavers in period / Avg Active HC in period * 100 grouped by <dimension>",
     },
     {
+        "pattern": "attrition rate last month",
+        "maps_to": "Attrition rate using lwd/date_of_exit in prior month and avg active HC",
+    },
+    {
         "pattern": "attrition trend last 12 months",
         "maps_to": "Rolling 12M attrition rate using lwd/date_of_exit and avg HC",
     },
@@ -213,6 +357,25 @@ HR_QUERY_PATTERNS = [
     {
         "pattern": "new hires this month",
         "maps_to": "COUNT(empid) WHERE newhireflag='Yes' for endofmonth",
+    },
+    {
+        "pattern": "exit reasons by department",
+        "maps_to": "Leaver count grouped by final_reason_of_exit and department",
+    },
+]
+
+HR_AMBIGUITY_RULES = [
+    {
+        "term": "attrition",
+        "default": "use lwd/date_of_exit as leaver event and avg active headcount in period",
+    },
+    {
+        "term": "team",
+        "maps_to": "manager_id",
+    },
+    {
+        "term": "function",
+        "maps_to": "department",
     },
 ]
 
@@ -325,11 +488,12 @@ def build_semantic_layer(
 
     relationships = _build_relationships(analysis_columns) if hr_context else []
     query_patterns = HR_QUERY_PATTERNS if hr_context else []
+    ambiguity_rules = HR_AMBIGUITY_RULES if hr_context else []
 
     # ---- YAML export -------------------------------------------------------
     layer_dict = {
         "semantic_layer": {
-            "version": "1.1",
+            "version": "1.2",
             "dimensions": dimensions,
             "measures": measures,
             "time_fields": time_fields,
@@ -337,6 +501,7 @@ def build_semantic_layer(
             "kpis": kpis,
             "relationships": relationships,
             "query_patterns": query_patterns,
+            "ambiguity_rules": ambiguity_rules,
         }
     }
     yaml_str = yaml.dump(layer_dict, default_flow_style=False, allow_unicode=True, sort_keys=False)
@@ -359,6 +524,7 @@ def build_semantic_layer(
         "kpis": kpis,
         "relationships": relationships,
         "query_patterns": query_patterns,
+        "ambiguity_rules": ambiguity_rules,
         "yaml": yaml_str,
         "lineage": lineage,
         "summary": summary,
