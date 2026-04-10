@@ -17,6 +17,7 @@ from google import genai
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+MAX_BACKOFF_DELAY_SECONDS = 3
 
 
 class QueryEngine:
@@ -45,10 +46,13 @@ class QueryEngine:
             "gemini-2.5-pro-preview-03-25",
         ]
         requested_models = model_names or [model_name]
+        combined_models = requested_models + default_models
+        self.model_candidates = []
         seen = set()
-        self.model_candidates = [
-            m for m in (requested_models + default_models) if m and not (m in seen or seen.add(m))
-        ]
+        for m in combined_models:
+            if m and m not in seen:
+                self.model_candidates.append(m)
+                seen.add(m)
         self.model_name = self.model_candidates[0]
         self.current_model_index = 0
         self.con = duckdb.connect(database=':memory:')
@@ -225,7 +229,7 @@ You are an expert Data Analyst. Your goal is to translate natural language into 
 
     def _get_backoff_delay(self, attempt: int) -> float:
         """Exponential backoff with a short cap for UI responsiveness."""
-        return min(2 ** (attempt - 1), 3)
+        return min(2 ** (attempt - 1), MAX_BACKOFF_DELAY_SECONDS)
 
     def _parse_structured_response(self, text: str) -> dict:
         """Parses the LLM's structured response into a clean dictionary."""
