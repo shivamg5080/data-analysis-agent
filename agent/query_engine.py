@@ -1,10 +1,16 @@
 """
 Query Engine Module
 ===================
-Handles natural language to SQL translation using Gemini, executes 
+Handles natural language to SQL translation using Gemini, executes
 SQL on DataFrames via DuckDB, and generates smart visualizations.
 
-Uses the new `google-genai` SDK (v1 API) for Streamlit Cloud compatibility.
+Integrates the Quota-Safe Query Orchestrator:
+  * Deterministic-first routing via the 25-question HC/Attrition catalogue.
+  * Per-model circuit breaker + exponential backoff for 429/503 errors.
+  * Configurable fallback chain and response cache.
+  * Per-query observability traces exposed in the UI "Show SQL & Reasoning".
+
+Uses the new ``google-genai`` SDK (v1 API) for Streamlit Cloud compatibility.
 """
 
 import logging
@@ -14,23 +20,56 @@ import time
 import duckdb
 import pandas as pd
 from google import genai
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 MAX_BACKOFF_DELAY_SECONDS = 3
 
+# Default orchestrator config (mirrors config.yaml defaults).
+_DEFAULT_ORCH_CONFIG: Dict[str, Any] = {
+    "deterministic_first": True,
+    "max_llm_calls_per_query": 1,
+    "default_model": "gemini-2.0-flash",
+    "fallback_chain": ["gemini-2.0-flash", "gemini-2.0-flash-lite", "template-only"],
+    "confidence_threshold_deterministic": 0.75,
+    "confidence_threshold_tier2": 0.40,
+    "rpm_per_session": 10,
+    "rpm_global": 60,
+    "token_budget_per_query": 8000,
+    "max_retries": 3,
+    "base_backoff_seconds": 1.0,
+    "max_backoff_seconds": 60.0,
+    "jitter": True,
+    "circuit_breaker_failure_threshold": 3,
+    "circuit_breaker_cooldown_seconds": 60,
+    "circuit_breaker_half_open_max_calls": 1,
+    "cache_ttl_seconds": 300,
+    "cache_max_entries": 500,
+    "catalogue_path": "catalogue.csv",
+}
+
 
 class QueryEngine:
-    """
-    Translates Natural Language to SQL, executes it, 
+    """Translates Natural Language to SQL, executes it,
     generates a plain-language summary, and suggests visualizations.
+
+    Quota-safe additions
+    --------------------
+    * ``generate_sql()`` first attempts deterministic routing (Tier 1) for
+      known HC/Attrition questions.  Only falls through to the LLM when
+      no template matches or the table schema doesn't fit.
+    * The ``LLMOrchestrator`` handles retry / backoff / circuit-breaker /
+      fallback-chain transparently.
+    * Each query produces a ``QueryTrace`` accessible via
+      ``self.last_trace`` for display in "Show SQL & Reasoning".
     """
 
     def __init__(
         self,
         api_key: str,
         model_name: str = "gemini-2.0-flash",
-        model_names: Optional[list[str]] = None,
+        model_names: Optional[List[str]] = None,
+        orchestrator_config: Optional[Dict[str, Any]] = None,
     ):
         if not api_key:
             raise ValueError("Gemini API key is required for AI Query functionality.")
@@ -47,8 +86,8 @@ class QueryEngine:
         ]
         requested_models = model_names or [model_name]
         combined_models = requested_models + default_models
-        self.model_candidates = []
-        seen = set()
+        self.model_candidates: List[str] = []
+        seen: set = set()
         for m in combined_models:
             if m and m not in seen:
                 self.model_candidates.append(m)
@@ -57,8 +96,45 @@ class QueryEngine:
         self.current_model_index = 0
         self.con = duckdb.connect(database=':memory:')
         self.chat = None
-        self.table_names = []
+        self.table_names: List[str] = []
         self._preamble = ""
+
+        # ---- Quota-safe orchestrator ----------------------------------------
+        orch_cfg = dict(_DEFAULT_ORCH_CONFIG)
+        if orchestrator_config:
+            orch_cfg.update(orchestrator_config)
+
+        # Build fallback chain from user-selected models + config defaults
+        orch_cfg["fallback_chain"] = self._build_fallback_chain(
+            self.model_candidates, orch_cfg.get("fallback_chain", [])
+        )
+
+        try:
+            from agent.hc_attrition.llm_orchestrator import LLMOrchestrator
+            from agent.hc_attrition.query_router import QueryRouter
+            from agent.hc_attrition.observability import ObservabilityTracker
+
+            self._orchestrator = LLMOrchestrator(
+                client=self.client,
+                fallback_chain=orch_cfg["fallback_chain"],
+                config=orch_cfg,
+            )
+            self._router = QueryRouter(config=orch_cfg)
+            self._obs = ObservabilityTracker()
+            self._orch_cfg = orch_cfg
+            logger.info(
+                "Quota-safe orchestrator initialised | fallback_chain=%s",
+                orch_cfg["fallback_chain"],
+            )
+        except Exception as exc:
+            logger.warning("Could not initialise orchestrator (non-fatal): %s", exc)
+            self._orchestrator = None
+            self._router = None
+            self._obs = None
+            self._orch_cfg = orch_cfg
+
+        # Last trace (set by generate_sql for UI display)
+        self.last_trace: Optional[Any] = None
 
     def start_chat(self, results_dict: dict):
         """
@@ -138,19 +214,204 @@ You are an expert Data Analyst. Your goal is to translate natural language into 
         )
 
     def generate_sql(self, query: str) -> dict:
-        """
-        Sends a natural language query and returns a structured dict with SQL + metadata.
+        """Translate *query* to SQL using deterministic routing or LLM fallback.
+
+        Routing tiers (when the orchestrator is available)
+        ---------------------------------------------------
+        Tier 1 — Deterministic template (no LLM call):
+            High-confidence match in the 25-question catalogue + table
+            columns look like HC/Attrition data.
+
+        Tier 2 — Lightweight LLM (flash):
+            Moderate-confidence match; sends schema-trimmed prompt to a
+            lightweight model via the quota-safe orchestrator.
+
+        Tier 3 — Full LLM (pro):
+            Low/no confidence; sends full prompt to the configured pro model.
+
+        The ``last_trace`` attribute is populated after every call for display
+        in the UI "Show SQL & Reasoning" expander.
         """
         if not self.chat:
-            return {"sql": None, "full_text": "Error: Chat not initialized", "status": "ERROR", "suggestions": []}
+            return {
+                "sql": None,
+                "full_text": "Error: Chat not initialized",
+                "status": "ERROR",
+                "suggestions": [],
+                "route_info": None,
+            }
+
+        # ---- Deterministic-first routing ------------------------------------
+        if self._router and self._orchestrator and self._obs:
+            trace = self._obs.start_trace(
+                query, preferred_model=self.model_name
+            )
+            try:
+                result = self._route_and_generate(query, trace)
+                self.last_trace = trace
+                return result
+            finally:
+                self._obs.finish_trace(trace)
+
+        # ---- Fallback: classic LLM-only path --------------------------------
+        try:
+            response = self._send_message_with_fallback(query)
+            full_text = response.text.strip()
+        except Exception as e:
+            return {
+                "sql": None,
+                "full_text": f"Error: {e}",
+                "status": "ERROR",
+                "suggestions": [],
+                "route_info": None,
+            }
+        return self._parse_structured_response(full_text)
+
+    def _route_and_generate(self, query: str, trace: Any) -> dict:
+        """Core routing + generation logic (used when orchestrator is active).
+
+        Mutates *trace* in-place with routing decisions and events.
+        """
+        from agent.hc_attrition.query_router import RouteTier
+
+        # Collect table column names for schema-aware routing
+        table_columns = self._get_all_registered_columns()
+        primary_table = self.table_names[0] if self.table_names else ""
+
+        route = self._router.route(
+            query,
+            table_name=primary_table,
+            table_columns=table_columns,
+        )
+        trace.route_tier = route.tier.value
+        trace.intent_key = route.intent_key
+        trace.confidence = route.confidence
+        trace.catalogue_id = route.catalogue_id
+
+        # ---- Tier 1: Deterministic ------------------------------------------
+        if route.is_deterministic() and route.sql:
+            # Check cache first (deterministic results can also be cached)
+            cache_key = self._orchestrator.cache_key_for(
+                query.lower().strip(),
+                primary_table,
+                {k: v for k, v in route.filters.items() if v is not None},
+            )
+            hit, cached_result = self._orchestrator.get_cache(cache_key)
+            if hit:
+                trace.cache_hit = True
+                trace.model_used = "cache"
+                trace.status = "success"
+                logger.info("Deterministic cache hit for query=%r", query[:60])
+                cached_result["route_info"] = trace.why_routed_summary()
+                return cached_result
+
+            result = {
+                "sql": route.sql,
+                "full_text": (
+                    f"EXPLANATION: {route.why}\n"
+                    f"STATUS: SUCCESS\n"
+                    f"SUGGESTIONS: "
+                    f"Show trend over time, "
+                    f"Break down by department, "
+                    f"Compare with last period"
+                ),
+                "explanation": route.why,
+                "status": "SUCCESS",
+                "correction_prompt": None,
+                "suggestions": [
+                    "Show trend over time",
+                    "Break down by department",
+                    "Compare with last period",
+                ],
+                "route_info": route.why,
+            }
+            trace.model_used = "deterministic"
+            trace.sql = route.sql
+            self._orchestrator.put_cache(cache_key, result)
+            return result
+
+        # ---- Tier 2 / 3: LLM path ------------------------------------------
+        preferred = route.preferred_model or self.model_name
+        trace.preferred_model = preferred
+
+        cache_key = self._orchestrator.cache_key_for(
+            query.lower().strip(),
+            primary_table,
+            {k: v for k, v in route.filters.items() if v is not None},
+        )
+        hit, cached_result = self._orchestrator.get_cache(cache_key)
+        if hit:
+            trace.cache_hit = True
+            trace.model_used = "cache"
+            cached_result["route_info"] = trace.why_routed_summary()
+            return cached_result
+
+        if not self.chat:
+            return {
+                "sql": None,
+                "full_text": "Error: Chat not initialized",
+                "status": "ERROR",
+                "suggestions": [],
+                "route_info": route.why,
+            }
 
         try:
             response = self._send_message_with_fallback(query)
             full_text = response.text.strip()
         except Exception as e:
-            return {"sql": None, "full_text": f"Error: {e}", "status": "ERROR", "suggestions": []}
+            trace.error_codes.append(str(e)[:60])
+            return {
+                "sql": None,
+                "full_text": f"Error: {e}",
+                "status": "ERROR",
+                "suggestions": [],
+                "route_info": route.why,
+            }
 
-        return self._parse_structured_response(full_text)
+        parsed = self._parse_structured_response(full_text)
+        parsed["route_info"] = route.why
+        trace.model_used = self.model_name
+        trace.sql = parsed.get("sql")
+        self._orchestrator.put_cache(cache_key, parsed)
+        return parsed
+
+    def _get_all_registered_columns(self) -> List[str]:
+        """Return a flat list of column names from all registered tables."""
+        columns: List[str] = []
+        for t in self.table_names:
+            try:
+                info = self.con.execute(
+                    f"SELECT column_name FROM information_schema.columns "
+                    f"WHERE table_name = '{t}'"
+                ).fetchall()
+                columns.extend(row[0] for row in info)
+            except Exception:
+                pass
+        return columns
+
+    @staticmethod
+    def _build_fallback_chain(
+        user_models: List[str], config_chain: List[str]
+    ) -> List[str]:
+        """Merge user-selected models with the config-defined fallback chain.
+
+        User-selected models are prepended; ``template-only`` sentinel is
+        preserved at the end.
+        """
+        sentinel = "template-only"
+        has_sentinel = sentinel in config_chain
+        # Start with user models, then add config chain (excluding duplicates)
+        combined: List[str] = []
+        seen: set = set()
+        for m in user_models + config_chain:
+            if m == sentinel:
+                continue
+            if m not in seen:
+                combined.append(m)
+                seen.add(m)
+        if has_sentinel:
+            combined.append(sentinel)
+        return combined
 
     def _send_message_with_fallback(self, query: str):
         """Sends message with retry + model fallback."""
