@@ -380,9 +380,11 @@ You are an expert Data Analyst. Your goal is to translate natural language into 
         columns: List[str] = []
         for t in self.table_names:
             try:
+                # Use a parameterized query to avoid SQL injection via table names
                 info = self.con.execute(
-                    f"SELECT column_name FROM information_schema.columns "
-                    f"WHERE table_name = '{t}'"
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = ?",
+                    [t],
                 ).fetchall()
                 columns.extend(row[0] for row in info)
             except Exception:

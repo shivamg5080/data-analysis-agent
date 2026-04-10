@@ -88,8 +88,15 @@ class RateLimiter:
                 if len(self._timestamps) < self._rpm:
                     self._timestamps.append(now)
                     return True
-                # Calculate how long to wait for the oldest slot to expire
-                wait = self._window_seconds - (now - self._timestamps[0]) + 0.05
+                # Add a small buffer beyond the slot-expiry time to prevent
+                # racing through the window boundary before the old timestamp
+                # is evicted by the next iteration.
+                _SLOT_EXPIRY_BUFFER_SECONDS = 0.05
+                wait = (
+                    self._window_seconds
+                    - (now - self._timestamps[0])
+                    + _SLOT_EXPIRY_BUFFER_SECONDS
+                )
             time.sleep(min(wait, deadline - time.monotonic()))
         return False
 
