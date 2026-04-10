@@ -10,12 +10,14 @@ Uses the new `google-genai` SDK (v1 API) for Streamlit Cloud compatibility.
 import logging
 import re
 import json
+import time
 import duckdb
 import pandas as pd
 from google import genai
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+MAX_BACKOFF_DELAY_SECONDS = 3
 
 
 class QueryEngine:
@@ -24,15 +26,39 @@ class QueryEngine:
     generates a plain-language summary, and suggests visualizations.
     """
 
-    def __init__(self, api_key: str, model_name: str = "gemini-2.0-flash"):
+    def __init__(
+        self,
+        api_key: str,
+        model_name: str = "gemini-2.0-flash",
+        model_names: Optional[list[str]] = None,
+    ):
         if not api_key:
             raise ValueError("Gemini API key is required for AI Query functionality.")
 
         self.client = genai.Client(api_key=api_key)
-        self.model_name = model_name
+        default_models = [
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-2.0-flash-001",
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash-preview-04-17",
+            "gemini-2.5-pro-preview-03-25",
+        ]
+        requested_models = model_names or [model_name]
+        combined_models = requested_models + default_models
+        self.model_candidates = []
+        seen = set()
+        for m in combined_models:
+            if m and m not in seen:
+                self.model_candidates.append(m)
+                seen.add(m)
+        self.model_name = self.model_candidates[0]
+        self.current_model_index = 0
         self.con = duckdb.connect(database=':memory:')
         self.chat = None
         self.table_names = []
+        self._preamble = ""
 
     def start_chat(self, results_dict: dict):
         """
@@ -75,35 +101,27 @@ You are an expert Data Analyst. Your goal is to translate natural language into 
    SUGGESTIONS: [Follow-up questions]
 ---
 """
-        preamble = f"SYSTEM INSTRUCTIONS:\n{system_instruction}\nPlease acknowledge and wait for the first user question."
-
-        # Try the selected model first, then fallbacks
-        models_to_try = [
-            self.model_name,
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-            "gemini-2.0-flash-001",
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
-        ]
-        # Deduplicate while preserving order
-        seen = set()
-        models_to_try = [m for m in models_to_try if not (m in seen or seen.add(m))]
+        self._preamble = f"SYSTEM INSTRUCTIONS:\n{system_instruction}\nPlease acknowledge and wait for the first user question."
 
         last_error = None
-        for m_name in models_to_try:
-            try:
-                logger.info(f"Trying model: {m_name}")
-                chat = self.client.chats.create(model=m_name)
-                chat.send_message(preamble)
-                self.chat = chat
-                self.model_name = m_name
-                logger.info(f"✅ Connected to model: {m_name}")
-                return
-            except Exception as e:
-                last_error = e
-                logger.warning(f"Model {m_name} failed: {e}")
-                continue
+        for idx, m_name in enumerate(self.model_candidates):
+            for attempt in range(1, 4):
+                try:
+                    logger.info(f"Trying model: {m_name} (attempt {attempt}/3)")
+                    chat = self.client.chats.create(model=m_name)
+                    chat.send_message(self._preamble)
+                    self.chat = chat
+                    self.model_name = m_name
+                    self.current_model_index = idx
+                    logger.info(f"✅ Connected to model: {m_name}")
+                    return
+                except Exception as e:
+                    last_error = e
+                    logger.warning(f"Model {m_name} failed (attempt {attempt}/3): {e}")
+                    if attempt < 3 and self._is_retryable_error(e):
+                        time.sleep(self._get_backoff_delay(attempt))
+                        continue
+                    break
 
         # List what's actually available to help debug
         try:
@@ -114,7 +132,7 @@ You are an expert Data Analyst. Your goal is to translate natural language into 
 
         raise RuntimeError(
             f"Could not connect to any Gemini model. "
-            f"Models tried: {', '.join(models_to_try)}. "
+            f"Models tried: {', '.join(self.model_candidates)}. "
             f"Available in your account: {available_str}. "
             f"Last error: {last_error}"
         )
@@ -127,12 +145,91 @@ You are an expert Data Analyst. Your goal is to translate natural language into 
             return {"sql": None, "full_text": "Error: Chat not initialized", "status": "ERROR", "suggestions": []}
 
         try:
-            response = self.chat.send_message(query)
+            response = self._send_message_with_fallback(query)
             full_text = response.text.strip()
         except Exception as e:
             return {"sql": None, "full_text": f"Error: {e}", "status": "ERROR", "suggestions": []}
 
         return self._parse_structured_response(full_text)
+
+    def _send_message_with_fallback(self, query: str):
+        """Sends message with retry + model fallback."""
+        if not self.chat:
+            raise RuntimeError("Chat not initialized.")
+
+        model_attempt_order = self._get_model_rotation_order()
+        last_error = None
+        for m_name in model_attempt_order:
+            if m_name != self.model_name:
+                self._reconnect_chat(m_name)
+            for attempt in range(1, 4):
+                try:
+                    return self.chat.send_message(query)
+                except Exception as e:
+                    last_error = e
+                    logger.warning(
+                        f"Query send failed on model {m_name} (attempt {attempt}/3): {e}"
+                    )
+                    if attempt < 3 and self._is_retryable_error(e):
+                        time.sleep(self._get_backoff_delay(attempt))
+                        continue
+                    break
+
+        raise RuntimeError(f"All configured models failed to answer. Last error: {last_error}")
+
+    def _reconnect_chat(self, model_name: str):
+        """Recreate chat context on a different model."""
+        chat = self.client.chats.create(model=model_name)
+        chat.send_message(self._preamble)
+        self.chat = chat
+        self.model_name = model_name
+        self.current_model_index = self.model_candidates.index(model_name)
+        logger.info(f"Reconnected chat using fallback model: {model_name}")
+
+    def _is_retryable_error(self, err: Exception) -> bool:
+        """Detect transient provider/network failures."""
+        msg = str(err).lower()
+        transient_markers = [
+            "503",
+            "unavailable",
+            "timeout",
+            "temporar",
+            "rate limit",
+            "deadline exceeded",
+            "connection reset",
+            "service unavailable",
+        ]
+        return any(marker in msg for marker in transient_markers)
+
+    def _generate_content_with_fallback(self, prompt: str):
+        """Calls generate_content with retry + model fallback."""
+        model_attempt_order = self._get_model_rotation_order()
+        last_error = None
+        for m_name in model_attempt_order:
+            for attempt in range(1, 4):
+                try:
+                    response = self.client.models.generate_content(model=m_name, contents=prompt)
+                    self.model_name = m_name
+                    self.current_model_index = self.model_candidates.index(m_name)
+                    return response
+                except Exception as e:
+                    last_error = e
+                    logger.warning(
+                        f"generate_content failed on model {m_name} (attempt {attempt}/3): {e}"
+                    )
+                    if attempt < 3 and self._is_retryable_error(e):
+                        time.sleep(self._get_backoff_delay(attempt))
+                        continue
+                    break
+        raise RuntimeError(f"All configured models failed to generate content. Last error: {last_error}")
+
+    def _get_model_rotation_order(self) -> list[str]:
+        """Returns candidates starting with current active model."""
+        return self.model_candidates[self.current_model_index:] + self.model_candidates[:self.current_model_index]
+
+    def _get_backoff_delay(self, attempt: int) -> float:
+        """Exponential backoff with a short cap for UI responsiveness."""
+        return min(2 ** (attempt - 1), MAX_BACKOFF_DELAY_SECONDS)
 
     def _parse_structured_response(self, text: str) -> dict:
         """Parses the LLM's structured response into a clean dictionary."""
@@ -274,7 +371,7 @@ Guidelines:
 """
 
         try:
-            response = self.client.models.generate_content(model=self.model_name, contents=prompt)
+            response = self._generate_content_with_fallback(prompt)
             return response.text.strip()
         except Exception as e:
             logger.warning(f"Summary generation failed: {e}")
@@ -316,7 +413,7 @@ Return ONLY a valid JSON object (no extra text):
 }}"""
 
         try:
-            response = self.client.models.generate_content(model=self.model_name, contents=prompt)
+            response = self._generate_content_with_fallback(prompt)
             raw = response.text.strip()
             match = re.search(r"\{[\s\S]*?\}", raw)
             if match:

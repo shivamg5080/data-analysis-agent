@@ -87,17 +87,20 @@ with st.sidebar:
     )
     api_key = api_key_input if api_key_input else secret_key
 
-    selected_model = st.selectbox(
-        "Model Version",
-        options=[
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-            "gemini-2.5-flash-preview-04-17",
-            "gemini-2.5-pro-preview-03-25",
-            "gemini-2.0-flash-001",
-        ],
-        index=0,
-        help="Choose the Gemini model. 'gemini-2.0-flash' is recommended — fast and widely available."
+    model_options = [
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-2.0-flash-001",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash-preview-04-17",
+        "gemini-2.5-pro-preview-03-25",
+    ]
+    selected_models = st.multiselect(
+        "Model Priority (Fallback Order)",
+        options=model_options,
+        default=["gemini-2.0-flash", "gemini-2.0-flash-lite"],
+        help="Select one or more models. The assistant will retry and fall back in this order if a model is temporarily unavailable."
     )
 
     st.markdown("---")
@@ -301,7 +304,10 @@ if st.session_state.all_results:
                 if st.session_state.qe_instance is None:
                     try:
                         from agent.query_engine import QueryEngine
-                        st.session_state.qe_instance = QueryEngine(api_key=api_key, model_name=selected_model)
+                        st.session_state.qe_instance = QueryEngine(
+                            api_key=api_key,
+                            model_names=selected_models or None,
+                        )
                         st.session_state.qe_instance.start_chat(st.session_state.all_results)
                     except Exception as e:
                         st.error(f"❌ AI Assistant Initialization Error: {e}")
