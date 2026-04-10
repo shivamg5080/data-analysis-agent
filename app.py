@@ -107,6 +107,27 @@ with st.sidebar:
     st.markdown("### 📋 Pipeline Log")
     log_placeholder = st.empty()
 
+    # ---- Observability metrics panel ----------------------------------------
+    st.markdown("---")
+    st.markdown("### 📊 Quota-Safe Orchestrator")
+    if "qe_instance" in st.session_state and st.session_state.qe_instance:
+        qe = st.session_state.qe_instance
+        obs = getattr(qe, "_obs", None)
+        if obs:
+            metrics = obs.summary()
+            total = max(metrics.get("total_queries", 0), 1)
+            col_a, col_b = st.columns(2)
+            col_a.metric("Queries", metrics.get("total_queries", 0))
+            col_b.metric("Cache Hits", metrics.get("cache_hits", 0))
+            col_a.metric("Determ. %", f"{metrics.get('deterministic_hit_rate_pct', 0):.0f}%")
+            col_b.metric("429 Retries", metrics.get("llm_calls_429", 0))
+            col_a.metric("LLM Calls", metrics.get("llm_calls", 0))
+            col_b.metric("Fallbacks", metrics.get("fallbacks", 0))
+        else:
+            st.caption("Orchestrator metrics unavailable")
+    else:
+        st.caption("Start the AI Assistant to see metrics.")
+
 # -----------------------------------------------------------------------
 # Hero header
 # -----------------------------------------------------------------------
@@ -263,6 +284,11 @@ if st.session_state.all_results:
                 with st.expander("🛠️ Show SQL & Reasoning", expanded=False):
                     if turn.get("explanation"):
                         st.markdown(f"**Analysis Reasoning:** {turn['explanation']}")
+                    # Routing / quota-safe info
+                    if turn.get("route_info"):
+                        st.divider()
+                        st.markdown("**🔀 Query Routing (Quota-Safe Orchestrator):**")
+                        st.info(turn["route_info"])
                     if turn.get("sql"):
                         st.code(turn["sql"], language="sql")
                     if turn.get("df_result") is not None:
@@ -323,6 +349,7 @@ if st.session_state.all_results:
                     "status": res.get("status", "SUCCESS"),
                     "correction_prompt": res.get("correction_prompt"),
                     "suggestions": res.get("suggestions", []),
+                    "route_info": res.get("route_info"),
                     "df_result": None,
                     "viz": None,
                     "error": None,

@@ -58,3 +58,43 @@ reporting:
     medium: 0.60
     low: 0.0
   max_insights: 20               # Maximum insights to include in report
+
+# Quota-Safe Query Orchestrator
+orchestrator:
+  # Feature flags
+  deterministic_first: true       # Try deterministic SQL templates before any LLM call
+  max_llm_calls_per_query: 1      # Maximum LLM API calls allowed per user question
+
+  # Model routing
+  default_model: "gemini-2.0-flash"
+  fallback_chain:                 # Ordered list; "template-only" = stop at deterministic result
+    - "gemini-2.0-flash"
+    - "gemini-2.0-flash-lite"
+    - "template-only"
+
+  # Confidence thresholds for tier routing
+  confidence_threshold_deterministic: 0.75   # >= this → Tier 1 (deterministic template)
+  confidence_threshold_tier2: 0.40           # >= this → Tier 2 (lightweight LLM)
+
+  # Rate limiting
+  rpm_per_session: 10             # Max requests per minute per Streamlit session
+  rpm_global: 60                  # Max requests per minute globally (all sessions)
+  token_budget_per_query: 8000    # Estimated token ceiling per query
+
+  # Retry & backoff
+  max_retries: 3
+  base_backoff_seconds: 1.0
+  max_backoff_seconds: 60.0
+  jitter: true                    # Add random jitter to backoff delays
+
+  # Circuit breaker (per model)
+  circuit_breaker_failure_threshold: 3      # Trips breaker after N consecutive failures
+  circuit_breaker_cooldown_seconds: 60      # Duration to stay OPEN before probing
+  circuit_breaker_half_open_max_calls: 1    # Probe calls allowed in HALF_OPEN state
+
+  # Response cache
+  cache_ttl_seconds: 300          # Cache entries expire after 5 minutes
+  cache_max_entries: 500          # Maximum cached responses
+
+  # Catalogue
+  catalogue_path: "catalogue.csv"

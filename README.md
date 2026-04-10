@@ -37,16 +37,27 @@ data analysis agent/
 │   ├── analysis_engine.py    # Stats, correlations, time-series, insights
 │   ├── visualization.py      # Smart Plotly chart generation
 │   ├── report_generator.py   # Self-contained HTML report
-│   └── orchestrator.py       # Pipeline orchestration
+│   ├── orchestrator.py       # Pipeline orchestration
+│   ├── query_engine.py       # NL→SQL + quota-safe LLM routing
+│   └── hc_attrition/         # Quota-Safe Query Orchestrator package
+│       ├── __init__.py
+│       ├── fy_helper.py      # April–March FY date utilities
+│       ├── catalogue.py      # 25-question catalogue + intent classification
+│       ├── sql_templates.py  # Deterministic SQL templates (all 25 questions)
+│       ├── query_router.py   # Tier 1/2/3 routing with confidence scoring
+│       ├── llm_orchestrator.py # Circuit breaker, retry/backoff, cache, rate limiter
+│       └── observability.py  # Per-query traces + aggregate metrics
 ├── tests/
 │   ├── test_ingestion.py
 │   ├── test_schema_inference.py
 │   ├── test_quality_checks.py
-│   └── test_semantic_layer.py
+│   ├── test_semantic_layer.py
+│   └── test_hc_attrition.py  # 83 tests for the quota-safe orchestrator
 ├── sample_data/
 │   └── generate_sample.py    # Generates sample_sales.xlsx (1,000 rows)
+├── catalogue.csv             # 25 HC/Attrition business questions
 ├── app.py                    # Streamlit UI
-├── config.yaml               # Configurable thresholds
+├── config.yaml               # Configurable thresholds + orchestrator settings
 ├── requirements.txt
 └── README.md
 ```
@@ -136,3 +147,137 @@ python -m pytest tests/ -v --tb=short
 ## 📄 License
 
 MIT License — free to use, modify, and distribute.
+
+---
+
+## 🔒 Quota-Safe Architecture and Model Routing
+
+### Overview
+
+The Quota-Safe Query Orchestrator ensures HC/Attrition analytics queries work
+reliably under Gemini rate limits (429 RESOURCE_EXHAUSTED, 503 transient errors)
+without user-facing failures.
+
+### Architecture
+
+```
+User Query
+    │
+    ▼
+┌─────────────────────┐
+│   QueryRouter       │  classify_intent() + extract_filters()
+│   (Tier 1/2/3)      │
+└─────────┬───────────┘
+          │
+   ┌──────┴──────────────────────────┐
+   │                                 │
+   ▼ confidence ≥ 0.75               ▼ confidence < 0.75
+┌──────────────────┐        ┌────────────────────┐
+│ Tier 1           │        │ Tier 2/3 (LLM)     │
+│ Deterministic    │        │ LLMOrchestrator    │
+│ SQL Template     │        └────────┬───────────┘
+│ (no LLM call)    │                 │
+└──────────────────┘    ┌────────────┼────────────┐
+          │             │            │             │
+          │          Rate         Retry/       Circuit
+          │         Limiter      Backoff       Breaker
+          │             │            │             │
+          │         ┌───┴────────────┴─────────────┴───┐
+          │         │     Fallback Chain                │
+          │         │  gemini-2.0-flash                 │
+          │         │  → gemini-2.0-flash-lite          │
+          │         │  → template-only                  │
+          │         └───────────────────────────────────┘
+          │
+          ▼
+    Response Cache  (keyed by normalized_query + table + filters)
+          │
+          ▼
+    ObservabilityTracker  (QueryTrace + aggregate metrics)
+```
+
+### Tier Routing
+
+| Tier | Trigger | Model | Behaviour |
+|------|---------|-------|-----------|
+| **1 — Deterministic** | confidence ≥ 0.75 for known catalogue intent | None | SQL template rendered; zero LLM calls |
+| **2 — Lightweight LLM** | 0.40 ≤ confidence < 0.75 | `gemini-2.0-flash-lite` | Lightweight model with schema-trimmed prompt |
+| **3 — Full LLM** | confidence < 0.40 or unknown intent | configured pro model | Full prompt; novel/complex queries |
+
+### Quota-Safety Features
+
+| Feature | Description |
+|---------|-------------|
+| **Deterministic templates** | 25 SQL templates for HC/Attrition questions; no LLM call for common patterns |
+| **Response cache** | TTL-based cache (default 5 min) keyed by query+table+filters; eliminates duplicate LLM calls |
+| **Rate limiter** | Sliding-window RPM guard per session and globally |
+| **Retry + backoff** | 503 → exponential backoff with jitter; 429 → honors `retryDelay` from API error |
+| **Circuit breaker** | Per-model (CLOSED→OPEN→HALF_OPEN); trips after N failures, auto-recovers after cooldown |
+| **Fallback chain** | `gemini-2.0-flash → gemini-2.0-flash-lite → template-only` (configurable) |
+
+### Configuration (`config.yaml`)
+
+```yaml
+orchestrator:
+  deterministic_first: true
+  max_llm_calls_per_query: 1
+  default_model: "gemini-2.0-flash"
+  fallback_chain:
+    - "gemini-2.0-flash"
+    - "gemini-2.0-flash-lite"
+    - "template-only"
+  confidence_threshold_deterministic: 0.75
+  confidence_threshold_tier2: 0.40
+  rpm_per_session: 10
+  rpm_global: 60
+  max_retries: 3
+  base_backoff_seconds: 1.0
+  circuit_breaker_failure_threshold: 3
+  circuit_breaker_cooldown_seconds: 60
+  cache_ttl_seconds: 300
+```
+
+### Example Traces
+
+**Normal attrition query (Tier 1 — no LLM):**
+```
+QUERY: "show me attrition for June 2025"
+→ intent=attrition_overall, confidence=0.92
+→ TIER 1 DETERMINISTIC — SQL template rendered
+→ cache_miss → result cached for 300s
+→ latency=2ms, model=deterministic, retries=0
+```
+
+**429 failover path:**
+```
+QUERY: "what is the voluntary attrition trend?"
+→ intent=attrition_vol_invol, confidence=0.78
+→ TIER 1 DETERMINISTIC (confidence ≥ 0.75) — template used
+→ No LLM call needed — 429 never reached
+```
+
+**Complex novel query (Tier 3 — LLM):**
+```
+QUERY: "correlation between satisfaction scores and attrition"
+→ intent=None, confidence=0.0
+→ TIER 3 FULL LLM — gemini-2.0-flash
+→ success on attempt 1, latency=1240ms
+```
+
+### Financial Year Logic
+
+All attrition YTD calculations use April–March FY:
+- `fy_start(date(2025, 6, 15))` → `2025-04-01`
+- `fy_end(date(2025, 6, 15))` → `2026-03-31`
+- `fy_label(date(2025, 6, 15))` → `"FY2025-26"`
+
+### Acceptance Criteria Status
+
+| Criterion | Status |
+|-----------|--------|
+| "show me attrition for June 2025" works without Pro model | ✅ Tier 1 deterministic template |
+| Repeated attrition queries don't cascade 429 | ✅ Cache + deterministic templates |
+| 429/503 → fallback path, output still returned | ✅ Circuit breaker + fallback chain |
+| Complex novel query still supported via LLM | ✅ Tier 3 routes to full model |
+| Logs show routing/fallback decisions | ✅ ObservabilityTracker + QueryTrace |
+| Existing headcount queries continue to work | ✅ Deterministic templates + backward-compatible |
