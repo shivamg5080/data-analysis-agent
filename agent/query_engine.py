@@ -115,7 +115,7 @@ You are an expert Data Analyst. Your goal is to translate natural language into 
                     last_error = e
                     logger.warning(f"Model {m_name} failed (attempt {attempt}/3): {e}")
                     if attempt < 3 and self._is_retryable_error(e):
-                        time.sleep(min(2 ** (attempt - 1), 3))
+                        time.sleep(self._get_backoff_delay(attempt))
                         continue
                     break
 
@@ -153,7 +153,7 @@ You are an expert Data Analyst. Your goal is to translate natural language into 
         if not self.chat:
             raise RuntimeError("Chat not initialized.")
 
-        model_attempt_order = self.model_candidates[self.current_model_index:] + self.model_candidates[:self.current_model_index]
+        model_attempt_order = self._get_model_rotation_order()
         last_error = None
         for m_name in model_attempt_order:
             if m_name != self.model_name:
@@ -167,7 +167,7 @@ You are an expert Data Analyst. Your goal is to translate natural language into 
                         f"Query send failed on model {m_name} (attempt {attempt}/3): {e}"
                     )
                     if attempt < 3 and self._is_retryable_error(e):
-                        time.sleep(min(2 ** (attempt - 1), 3))
+                        time.sleep(self._get_backoff_delay(attempt))
                         continue
                     break
 
@@ -199,7 +199,7 @@ You are an expert Data Analyst. Your goal is to translate natural language into 
 
     def _generate_content_with_fallback(self, prompt: str):
         """Calls generate_content with retry + model fallback."""
-        model_attempt_order = self.model_candidates[self.current_model_index:] + self.model_candidates[:self.current_model_index]
+        model_attempt_order = self._get_model_rotation_order()
         last_error = None
         for m_name in model_attempt_order:
             for attempt in range(1, 4):
@@ -214,10 +214,18 @@ You are an expert Data Analyst. Your goal is to translate natural language into 
                         f"generate_content failed on model {m_name} (attempt {attempt}/3): {e}"
                     )
                     if attempt < 3 and self._is_retryable_error(e):
-                        time.sleep(min(2 ** (attempt - 1), 3))
+                        time.sleep(self._get_backoff_delay(attempt))
                         continue
                     break
         raise RuntimeError(f"All configured models failed to generate content. Last error: {last_error}")
+
+    def _get_model_rotation_order(self) -> list[str]:
+        """Returns candidates starting with current active model."""
+        return self.model_candidates[self.current_model_index:] + self.model_candidates[:self.current_model_index]
+
+    def _get_backoff_delay(self, attempt: int) -> float:
+        """Exponential backoff with a short cap for UI responsiveness."""
+        return min(2 ** (attempt - 1), 3)
 
     def _parse_structured_response(self, text: str) -> dict:
         """Parses the LLM's structured response into a clean dictionary."""
