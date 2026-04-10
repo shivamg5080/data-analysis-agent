@@ -35,32 +35,49 @@ AGG_COUNT_KEYWORDS = ["count", "cnt", "num", "number", "id"]
 # ---------------------------------------------------------------------------
 
 HR_SEMANTIC_OVERRIDES: dict[str, dict[str, Any]] = {
- "attrition": {
-    "type": SEM_KPI,
-    "description": "Employee attrition rate calculated as exits divided by headcount, aligned to financial year (April–March).",
-    "synonyms": ["attrition rate", "employee churn", "exit rate", "employee turnover"],
-    "allowed_operations": ["calculate", "trend", "filter"],
-    "related_columns": ["date_of_exit", "lwd", "empid", "empstatus", "endofmonth"],
-    "formula": "exits / headcount",
-    "time_logic": {
-        "financial_year_start": "April",
-        "financial_year_end": "March",
-        "monthly_behavior": "cumulative exits from April to selected month / headcount",
-        "yearly_behavior": "calculate from April of that year",
-        "range_behavior": "cumulative exits over range / headcount"
+    "attrition": {
+        "type": SEM_KPI,
+        "description": (
+            "Employee attrition rate calculated as exits divided by average active "
+            "headcount for the selected period, aligned to financial year (April–March)."
+        ),
+        "synonyms": ["attrition rate", "employee churn", "exit rate", "employee turnover"],
+        "allowed_operations": ["calculate", "trend", "filter"],
+        "related_columns": ["date_of_exit", "lwd", "resignation_date", "empid", "empstatus", "endofmonth"],
+        # Standard definition: exits / average active headcount
+        "formula": "exits / avg_active_headcount",
+        "time_logic": {
+            "financial_year_start": "April",
+            "financial_year_end": "March",
+            # For a month like October, use cumulative exits April→October
+            # and average active headcount April→October
+            "monthly_behavior": (
+                "cumulative exits from April to selected month / "
+                "average active headcount from April to selected month"
+            ),
+            "yearly_behavior": "calculate from April of that year",
+            "range_behavior": (
+                "cumulative exits over range / average active headcount over range"
+            ),
+        },
+        "required_columns": ["Exit_Date OR Attrition flag", "Employee_ID", "Headcount"],
+        "sql_template": {
+            "monthly": (
+                "SUM(exits from April to selected month) / "
+                "AVG(active headcount from April to selected month)"
+            ),
+            "yearly": (
+                "SUM(exits from April of that year) / "
+                "AVG(active headcount from April of that year)"
+            ),
+        },
+        "edge_cases": [
+            "Handle missing exit dates",
+            "Avoid division by zero",
+            "Ensure correct financial year mapping",
+            "Handle partial data months",
+        ],
     },
-    "required_columns": ["Exit_Date OR Attrition flag", "Employee_ID", "Headcount"],
-    "sql_template": {
-        "monthly": "SUM(exits from April to selected month) / headcount",
-        "yearly": "SUM(exits from April of that year) / headcount"
-    },
-    "edge_cases": [
-        "Handle missing exit dates",
-        "Avoid division by zero",
-        "Ensure correct financial year mapping",
-        "Handle partial data months"
-    ]
-},
     "empid": {
         "type": SEM_ENTITY,
         "description": "Primary employee identifier used for headcount and attrition",
