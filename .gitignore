@@ -127,6 +127,7 @@ venv.bak/
 # My own project specific ignores
 *.xlsx
 *.csv
+!catalogue.csv
 reports/
 report_*.html
 *.pdf
