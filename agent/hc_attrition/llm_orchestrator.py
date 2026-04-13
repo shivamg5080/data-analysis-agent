@@ -318,7 +318,14 @@ class LLMOrchestrator:
         self._providers: Dict[str, Any] = dict(providers or {})
         if client and "gemini" not in self._providers:
             self._providers["gemini"] = client
-        self._ensure_provider("ollama", cfg)
+        if self._chain_includes_provider("ollama"):
+            self._ensure_provider("ollama", cfg)
+
+        if not self._providers:
+            logger.warning(
+                "LLMOrchestrator initialized with no providers; "
+                "all LLM calls will use template-only fallback."
+            )
 
         self._max_retries: int = int(cfg["max_retries"])
         self._base_backoff: float = float(cfg["base_backoff_seconds"])
