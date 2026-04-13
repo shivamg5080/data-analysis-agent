@@ -520,8 +520,9 @@ def _render_insights(insights: list[dict]) -> str:
         p = ins.get("priority", 3)
         icon = _PRIORITY_ICON.get(p, "🔵")
         cls = _PRIORITY_CLASS.get(p, "p3")
-        conf = ins.get("confidence", 0.8)
-        fill_width = int(conf * 100)
+        # TODO(next task): Re-enable insight confidence rendering (bar + percentage).
+        # conf = ins.get("confidence", 0.8)
+        # fill_width = int(conf * 100)
         html_parts.append(f"""
         <div class="insight-card {cls}">
           <div class="insight-icon">{icon}</div>
@@ -529,12 +530,7 @@ def _render_insights(insights: list[dict]) -> str:
             <div class="insight-cat">{ins.get('category', '')}</div>
             <div class="title">{ins.get('title', '')}</div>
             <div class="detail">{ins.get('detail', '')}</div>
-            <div class="confidence-bar" title="Confidence: {conf:.0%}">
-              <div class="confidence-bar-fill" style="width:{fill_width}%;"></div>
-            </div>
-          </div>
-          <div style="font-size:.75rem;color:#A0AEC0;white-space:nowrap;align-self:flex-end;">
-            {fill_width}% confidence
+            <!-- TODO(next task): confidence bar intentionally hidden for now -->
           </div>
         </div>""")
     return "\n".join(html_parts)
