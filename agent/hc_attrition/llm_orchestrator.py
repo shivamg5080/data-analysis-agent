@@ -49,6 +49,7 @@ _DEFAULTS: Dict[str, Any] = {
     "circuit_breaker_half_open_max_calls": 1,
     "cache_ttl_seconds": 300,
     "cache_max_entries": 500,
+    "ollama_base_url": "http://localhost:11434",
 }
 
 
@@ -303,15 +304,28 @@ class LLMOrchestrator:
 
     def __init__(
         self,
-        client: Any,
+        client: Optional[Any],
         fallback_chain: List[str],
         config: Optional[Dict[str, Any]] = None,
+        providers: Optional[Dict[str, Any]] = None,
     ):
         self._client = client
         self._fallback_chain = fallback_chain or ["gemini-2.0-flash"]
         cfg = dict(_DEFAULTS)
         if config:
             cfg.update(config)
+
+        self._providers: Dict[str, Any] = dict(providers or {})
+        if client and "gemini" not in self._providers:
+            self._providers["gemini"] = client
+        if self._chain_includes_provider("ollama"):
+            self._ensure_provider("ollama", cfg)
+
+        if not self._providers:
+            logger.warning(
+                "LLMOrchestrator initialized with no providers; "
+                "all LLM calls will use template-only fallback."
+            )
 
         self._max_retries: int = int(cfg["max_retries"])
         self._base_backoff: float = float(cfg["base_backoff_seconds"])
@@ -345,6 +359,7 @@ class LLMOrchestrator:
         self.stats: Dict[str, int] = {
             "total_calls": 0,
             "cache_hits": 0,
+            "retry_total": 0,
             "retry_429": 0,
             "retry_503": 0,
             "fallbacks": 0,
@@ -466,6 +481,25 @@ class LLMOrchestrator:
             chain.insert(0, preferred_model)
         return chain
 
+    def _ensure_provider(self, provider: str, cfg: Dict[str, Any]) -> None:
+        if provider in self._providers:
+            return
+        if provider == "ollama" and self._chain_includes_provider("ollama"):
+            from agent.hc_attrition.ollama_client import OllamaClient
+
+            self._providers["ollama"] = OllamaClient(
+                base_url=str(cfg.get("ollama_base_url", "http://localhost:11434"))
+            )
+
+    def _chain_includes_provider(self, provider: str) -> bool:
+        for model in self._fallback_chain:
+            if model == "template-only":
+                continue
+            parsed = self._parse_model_spec(model)
+            if parsed[0] == provider:
+                return True
+        return False
+
     def _try_model(
         self, model_name: str, prompt: str
     ) -> Tuple[Optional[Any], List[str]]:
@@ -486,11 +520,16 @@ class LLMOrchestrator:
             return None, events
 
         last_exc: Optional[Exception] = None
+        provider, model_id = self._parse_model_spec(model_name)
+        client = self._providers.get(provider)
+        if client is None:
+            events.append(f"provider_missing:{provider}")
+            logger.warning("No provider registered for %s", provider)
+            return None, events
+
         for attempt in range(1, self._max_retries + 1):
             try:
-                response = self._client.models.generate_content(
-                    model=model_name, contents=prompt
-                )
+                response = self._invoke_provider(client, provider, model_id, prompt)
                 logger.info(
                     "LLM success: model=%s attempt=%d", model_name, attempt
                 )
@@ -504,6 +543,7 @@ class LLMOrchestrator:
                 is_503 = self._is_transient_error(exc)
 
                 if is_429:
+                    self.stats["retry_total"] += 1
                     self.stats["retry_429"] += 1
                     delay = self._extract_retry_delay(exc) or self._backoff(attempt)
                     events.append(f"429:{model_name}:wait={delay:.1f}s")
@@ -513,6 +553,7 @@ class LLMOrchestrator:
                     )
                     time.sleep(delay)
                 elif is_503:
+                    self.stats["retry_total"] += 1
                     self.stats["retry_503"] += 1
                     delay = self._backoff(attempt)
                     events.append(f"503:{model_name}:wait={delay:.1f}s")
@@ -534,6 +575,22 @@ class LLMOrchestrator:
                     )
 
         return None, events
+
+    @staticmethod
+    def _parse_model_spec(model_name: str) -> Tuple[str, str]:
+        """Return (provider, model_id) from a model spec."""
+        lowered = model_name.lower()
+        if lowered.startswith("gemini:"):
+            return "gemini", model_name.split(":", 1)[1]
+        if lowered.startswith("ollama:"):
+            return "ollama", model_name.split(":", 1)[1]
+        return "gemini", model_name
+
+    @staticmethod
+    def _invoke_provider(client: Any, provider: str, model_id: str, prompt: str) -> Any:
+        if provider == "gemini":
+            return client.models.generate_content(model=model_id, contents=prompt)
+        return client.generate_content(model=model_id, contents=prompt)
 
     def _backoff(self, attempt: int) -> float:
         """Compute exponential backoff with optional jitter."""
