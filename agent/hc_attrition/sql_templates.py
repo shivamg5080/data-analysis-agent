@@ -47,19 +47,84 @@ def _maybe_and_filter(col: str, value: Optional[str]) -> str:
     return f"  AND {_col(col)} = '{safe_val}'\n"
 
 
+def _is_valid_date(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    _iso = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    return bool(_iso.match(value))
+
+
 def _maybe_date_filter(
     col: str,
     start: Optional[str],
     end: Optional[str],
 ) -> str:
     """Return date range filter clause if dates are provided."""
-    if not start or not end:
-        return ""
-    # Validate ISO-8601 date format to prevent injection
-    _iso = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-    if not (_iso.match(start) and _iso.match(end)):
+    if not (_is_valid_date(start) and _is_valid_date(end)):
         return ""
     return f"  AND {_col(col)} BETWEEN '{start}' AND '{end}'\n"
+
+
+def _latest_month_filter(col: str, table: str) -> str:
+    """Filter to the latest month available in the dataset."""
+    return (
+        f"  AND DATE_TRUNC('month', {_col(col)}) = (\n"
+        f"    SELECT DATE_TRUNC('month', MAX({_col(col)})) FROM {table}\n"
+        f"  )\n"
+    )
+
+
+def _fy_start_expr(date_expr: str) -> str:
+    return (
+        "CASE WHEN EXTRACT('month' FROM {expr}) >= 4 "
+        "THEN DATE_TRUNC('year', {expr}) + INTERVAL '3 months' "
+        "ELSE DATE_TRUNC('year', {expr}) - INTERVAL '9 months' END"
+    ).format(expr=date_expr)
+
+
+def _attrition_params_ctes(
+    table: str,
+    month_start: Optional[str],
+    month_end: Optional[str],
+    latest_col: str = "endofmonth",
+) -> tuple[list[str], str, str]:
+    """Return CTE list, month_start expr, month_end expr for attrition queries."""
+    t = _tbl(table)
+    if _is_valid_date(month_start) and _is_valid_date(month_end):
+        start_expr = f"DATE '{month_start}'"
+        end_expr = f"DATE '{month_end}'"
+        params_cte = (
+            "params AS (\n"
+            f"  SELECT {start_expr} AS month_start,\n"
+            f"         {end_expr} AS month_end,\n"
+            f"         {_fy_start_expr(end_expr)} AS fy_start\n"
+            ")"
+        )
+        return [params_cte], start_expr, end_expr
+
+    latest_cte = (
+        "latest_month AS (\n"
+        f"  SELECT\n"
+        f"    DATE_TRUNC('month', MAX({_col(latest_col)})) AS month_start,\n"
+        f"    DATE_TRUNC('month', MAX({_col(latest_col)})) + INTERVAL '1 month' - INTERVAL '1 day' AS month_end\n"
+        f"  FROM {t}\n"
+        ")"
+    )
+    params_cte = (
+        "params AS (\n"
+        "  SELECT month_start,\n"
+        "         month_end,\n"
+        f"         {_fy_start_expr('month_end')} AS fy_start\n"
+        "  FROM latest_month\n"
+        ")"
+    )
+    return [latest_cte, params_cte], "month_start", "month_end"
+
+
+def _with_ctes(ctes: list[str]) -> str:
+    if not ctes:
+        return ""
+    return "WITH " + ",\n".join(ctes) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +181,8 @@ def _q1_hc_total_snapshot(table: str, f: dict) -> str:
     gender_f = _maybe_and_filter("gender", f.get("gender"))
     lob_f = _maybe_and_filter("lob", f.get("lob"))
     date_f = _maybe_date_filter("endofmonth", f.get("month_start"), f.get("month_end"))
+    if not date_f:
+        date_f = _latest_month_filter("endofmonth", t)
     return (
         f"SELECT COUNT(DISTINCT \"empid\") AS active_headcount\n"
         f"FROM {t}\n"
@@ -151,6 +218,8 @@ def _q3_hc_by_gender(table: str, f: dict) -> str:
     dept_f = _maybe_and_filter("department", f.get("department"))
     lob_f = _maybe_and_filter("lob", f.get("lob"))
     date_f = _maybe_date_filter("endofmonth", f.get("month_start"), f.get("month_end"))
+    if not date_f:
+        date_f = _latest_month_filter("endofmonth", t)
     return (
         f"SELECT\n"
         f"  \"department\",\n"
@@ -176,6 +245,8 @@ def _q4_hc_team(table: str, f: dict) -> str:
     mgr_f = _maybe_and_filter("manager_id", f.get("manager_id"))
     dept_f = _maybe_and_filter("department", f.get("department"))
     date_f = _maybe_date_filter("endofmonth", f.get("month_start"), f.get("month_end"))
+    if not date_f:
+        date_f = _latest_month_filter("endofmonth", t)
     return (
         f"SELECT\n"
         f"  \"manager_name\",\n"
@@ -194,6 +265,8 @@ def _q5_hc_by_grade(table: str, f: dict) -> str:
     t = _tbl(table)
     dept_f = _maybe_and_filter("department", f.get("department"))
     date_f = _maybe_date_filter("endofmonth", f.get("month_start"), f.get("month_end"))
+    if not date_f:
+        date_f = _latest_month_filter("endofmonth", t)
     return (
         f"SELECT\n"
         f"  \"grade\",\n"
@@ -236,6 +309,8 @@ def _q7_hc_by_tenure(table: str, f: dict) -> str:
     dept_f = _maybe_and_filter("department", f.get("department"))
     grade_f = _maybe_and_filter("grade", f.get("grade"))
     date_f = _maybe_date_filter("endofmonth", f.get("month_start"), f.get("month_end"))
+    if not date_f:
+        date_f = _latest_month_filter("endofmonth", t)
     return (
         f"SELECT\n"
         f"  \"tenure_bucket\",\n"
@@ -255,6 +330,8 @@ def _q8_hc_by_emp_type(table: str, f: dict) -> str:
     dept_f = _maybe_and_filter("department", f.get("department"))
     lob_f = _maybe_and_filter("lob", f.get("lob"))
     date_f = _maybe_date_filter("endofmonth", f.get("month_start"), f.get("month_end"))
+    if not date_f:
+        date_f = _latest_month_filter("endofmonth", t)
     return (
         f"SELECT\n"
         f"  \"employeetype\",\n"
@@ -278,6 +355,8 @@ def _q9_hc_by_business_group(table: str, f: dict) -> str:
     t = _tbl(table)
     lob_f = _maybe_and_filter("lob", f.get("lob"))
     date_f = _maybe_date_filter("endofmonth", f.get("month_start"), f.get("month_end"))
+    if not date_f:
+        date_f = _latest_month_filter("endofmonth", t)
     return (
         f"SELECT\n"
         f"  \"lob\",\n"
@@ -298,6 +377,8 @@ def _q10_hc_ic_pm_split(table: str, f: dict) -> str:
     mgr_f = _maybe_and_filter("manager_id", f.get("manager_id"))
     dept_f = _maybe_and_filter("department", f.get("department"))
     date_f = _maybe_date_filter("endofmonth", f.get("month_start"), f.get("month_end"))
+    if not date_f:
+        date_f = _latest_month_filter("endofmonth", t)
     return (
         f"SELECT\n"
         f"  \"ic_pm\",\n"
@@ -322,42 +403,52 @@ def _q11_attrition_overall(table: str, f: dict) -> str:
     dept_f = _maybe_and_filter("department", f.get("department"))
     lob_f = _maybe_and_filter("lob", f.get("lob"))
     grade_f = _maybe_and_filter("grade", f.get("grade"))
-    date_f = _maybe_date_filter("lwd", f.get("month_start"), f.get("month_end"))
-
-    if not date_f:
-        # Default: current calendar month
-        date_f = "  AND DATE_TRUNC('month', \"lwd\") = DATE_TRUNC('month', CURRENT_DATE)\n"
-
+    ctes, _, _ = _attrition_params_ctes(
+        table, f.get("month_start"), f.get("month_end")
+    )
+    ctes.extend([
+        (
+            "leavers AS (\n"
+            f"  SELECT COUNT(DISTINCT \"empid\") AS leaver_count\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"empstatus\" = 'Inactive'\n"
+            "    AND CAST(\"lwd\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{dept_f}{lob_f}{grade_f}"
+            ")"
+        ),
+        (
+            "monthly_hc AS (\n"
+            "  SELECT\n"
+            "    DATE_TRUNC('month', \"endofmonth\") AS month,\n"
+            "    COUNT(DISTINCT \"empid\") AS active_hc\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"empstatus\" = 'Active'\n"
+            "    AND CAST(\"endofmonth\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{dept_f}{lob_f}{grade_f}"
+            "  GROUP BY DATE_TRUNC('month', \"endofmonth\")\n"
+            ")"
+        ),
+        (
+            "avg_hc AS (\n"
+            "  SELECT AVG(active_hc) AS avg_active_hc\n"
+            "  FROM monthly_hc\n"
+            ")"
+        ),
+    ])
     return (
-        f"WITH leavers AS (\n"
-        f"  SELECT COUNT(DISTINCT \"empid\") AS leaver_count\n"
-        f"  FROM {t}\n"
-        f"  WHERE \"empstatus\" = 'Inactive'\n"
-        f"  {dept_f.strip()}\n"
-        f"  {lob_f.strip()}\n"
-        f"  {grade_f.strip()}\n"
-        f"  {date_f.strip()}\n"
-        f"),\n"
-        f"avg_hc AS (\n"
-        f"  SELECT COUNT(DISTINCT \"empid\") AS total_active\n"
-        f"  FROM {t}\n"
-        f"  WHERE \"empstatus\" = 'Active'\n"
-        f"  {dept_f.strip()}\n"
-        f"  {lob_f.strip()}\n"
-        f"  {grade_f.strip()}\n"
-        f")\n"
-        f"SELECT\n"
-        f"  l.leaver_count,\n"
-        f"  a.total_active,\n"
-        f"  ROUND(\n"
-        f"    -- Attrition % = Leavers / Average HC * 100\n"
-        f"    -- Average HC ≈ End-of-period Active HC + (Leavers / 2)\n"
-        f"    -- (approximates the midpoint between beginning and ending HC)\n"
-        f"    l.leaver_count * 100.0 / NULLIF(a.total_active + l.leaver_count / 2.0, 0),\n"
-        f"    2\n"
-        f"  ) AS attrition_rate_pct\n"
-        f"FROM leavers l, avg_hc a\n"
-        f";"
+        _with_ctes(ctes)
+        + "SELECT\n"
+        "  l.leaver_count,\n"
+        "  a.avg_active_hc,\n"
+        "  ROUND(\n"
+        "    l.leaver_count * 100.0 / NULLIF(a.avg_active_hc, 0),\n"
+        "    2\n"
+        "  ) AS attrition_rate_pct,\n"
+        "  p.month_end AS month_end\n"
+        "FROM leavers l, avg_hc a, params p\n"
+        ";"
     )
 
 
@@ -433,36 +524,58 @@ def _q15_attrition_by_tenure(table: str, f: dict) -> str:
     """Q15: Attrition rate by tenure bucket."""
     t = _tbl(table)
     dept_f = _maybe_and_filter("department", f.get("department"))
-    date_f = _maybe_date_filter("lwd", f.get("month_start"), f.get("month_end"))
+    ctes, _, _ = _attrition_params_ctes(
+        table, f.get("month_start"), f.get("month_end")
+    )
+    ctes.extend([
+        (
+            "leavers AS (\n"
+            "  SELECT \"tenure_bucket\", COUNT(DISTINCT \"empid\") AS leaver_count\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"empstatus\" = 'Inactive'\n"
+            "    AND CAST(\"lwd\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{dept_f}"
+            "  GROUP BY \"tenure_bucket\"\n"
+            ")"
+        ),
+        (
+            "monthly_hc AS (\n"
+            "  SELECT\n"
+            "    DATE_TRUNC('month', \"endofmonth\") AS month,\n"
+            "    \"tenure_bucket\",\n"
+            "    COUNT(DISTINCT \"empid\") AS active_hc\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"empstatus\" = 'Active'\n"
+            "    AND CAST(\"endofmonth\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{dept_f}"
+            "  GROUP BY DATE_TRUNC('month', \"endofmonth\"), \"tenure_bucket\"\n"
+            ")"
+        ),
+        (
+            "avg_hc AS (\n"
+            "  SELECT \"tenure_bucket\", AVG(active_hc) AS avg_active_hc\n"
+            "  FROM monthly_hc\n"
+            "  GROUP BY \"tenure_bucket\"\n"
+            ")"
+        ),
+    ])
     return (
-        f"WITH leavers AS (\n"
-        f"  SELECT \"tenure_bucket\", COUNT(DISTINCT \"empid\") AS leaver_count\n"
-        f"  FROM {t}\n"
-        f"  WHERE \"empstatus\" = 'Inactive'\n"
-        f"  {dept_f.strip()}\n"
-        f"  {date_f.strip()}\n"
-        f"  GROUP BY \"tenure_bucket\"\n"
-        f"),\n"
-        f"total_hc AS (\n"
-        f"  SELECT \"tenure_bucket\", COUNT(DISTINCT \"empid\") AS active_count\n"
-        f"  FROM {t}\n"
-        f"  WHERE \"empstatus\" = 'Active'\n"
-        f"  {dept_f.strip()}\n"
-        f"  GROUP BY \"tenure_bucket\"\n"
-        f")\n"
-        f"SELECT\n"
-        f"  COALESCE(l.\"tenure_bucket\", h.\"tenure_bucket\") AS tenure_bucket,\n"
-        f"  COALESCE(l.leaver_count, 0) AS leavers,\n"
-        f"  COALESCE(h.active_count, 0) AS active_hc,\n"
-        f"  ROUND(\n"
-        f"    COALESCE(l.leaver_count, 0) * 100.0 /\n"
-        f"    NULLIF(COALESCE(h.active_count, 0) + COALESCE(l.leaver_count, 0), 0),\n"
-        f"    2\n"
-        f"  ) AS attrition_rate_pct\n"
-        f"FROM leavers l\n"
-        f"FULL OUTER JOIN total_hc h USING (\"tenure_bucket\")\n"
-        f"ORDER BY attrition_rate_pct DESC\n"
-        f";"
+        _with_ctes(ctes)
+        + "SELECT\n"
+        "  COALESCE(l.\"tenure_bucket\", a.\"tenure_bucket\") AS tenure_bucket,\n"
+        "  COALESCE(l.leaver_count, 0) AS leavers,\n"
+        "  COALESCE(a.avg_active_hc, 0) AS avg_active_hc,\n"
+        "  ROUND(\n"
+        "    COALESCE(l.leaver_count, 0) * 100.0 /\n"
+        "    NULLIF(COALESCE(a.avg_active_hc, 0), 0),\n"
+        "    2\n"
+        "  ) AS attrition_rate_pct\n"
+        "FROM leavers l\n"
+        "FULL OUTER JOIN avg_hc a USING (\"tenure_bucket\")\n"
+        "ORDER BY attrition_rate_pct DESC\n"
+        ";"
     )
 
 
