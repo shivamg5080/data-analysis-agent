@@ -14,7 +14,8 @@ from typing import Optional, Tuple
 
 # Indian FY starts in April
 FY_START_MONTH = 4  # April
-# If base_year - parsed_year exceeds this, assume the next century (e.g., 1999 → 00).
+# If the parsed year is more than this many years away from base_year,
+# shift the century to keep the result within a reasonable window.
 YEAR_ROLLOVER_THRESHOLD = 50
 
 
@@ -220,8 +221,11 @@ def _normalize_year(token: str, base_year: Optional[int] = None) -> int:
         else:
             century = date.today().year // 100
         year = century * 100 + year
-        if base_year and year < base_year and (base_year - year) > YEAR_ROLLOVER_THRESHOLD:
-            year += 100
+        if base_year:
+            if (year - base_year) > YEAR_ROLLOVER_THRESHOLD:
+                year -= 100
+            elif (base_year - year) > YEAR_ROLLOVER_THRESHOLD:
+                year += 100
     return year
 
 
