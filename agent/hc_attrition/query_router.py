@@ -156,7 +156,7 @@ class QueryRouter:
         from agent.hc_attrition.sql_templates import render_template
 
         intent_key, confidence = classify_intent(query)
-        filters = extract_filters(query)
+        filters = extract_filters(query, intent_key=intent_key)
 
         logger.info(
             "Router: query=%r intent=%s confidence=%.2f",

@@ -354,6 +354,7 @@ def _q9_hc_by_business_group(table: str, f: dict) -> str:
     """Q9: Headcount comparison across business groups."""
     t = _tbl(table)
     lob_f = _maybe_and_filter("lob", f.get("lob"))
+    bg_f = _maybe_and_filter("businessgroup", f.get("businessgroup"))
     date_f = _maybe_date_filter("endofmonth", f.get("month_start"), f.get("month_end"))
     if not date_f:
         date_f = _latest_month_filter("endofmonth", t)
@@ -364,7 +365,7 @@ def _q9_hc_by_business_group(table: str, f: dict) -> str:
         f"  COUNT(DISTINCT \"empid\") AS headcount\n"
         f"FROM {t}\n"
         f"WHERE \"empstatus\" = 'Active'\n"
-        f"{lob_f}{date_f}"
+        f"{lob_f}{bg_f}{date_f}"
         f"GROUP BY \"lob\", \"businessgroup\"\n"
         f"ORDER BY headcount DESC\n"
         f";"
@@ -457,9 +458,12 @@ def _q12_attrition_vol_invol(table: str, f: dict) -> str:
     t = _tbl(table)
     dept_f = _maybe_and_filter("department", f.get("department"))
     grade_f = _maybe_and_filter("grade", f.get("grade"))
-    date_f = _maybe_date_filter("lwd", f.get("month_start"), f.get("month_end"))
+    ctes, _, _ = _attrition_params_ctes(
+        table, f.get("month_start"), f.get("month_end")
+    )
     return (
-        f"SELECT\n"
+        _with_ctes(ctes)
+        + f"SELECT\n"
         f"  \"final_exit_type\",\n"
         f"  COUNT(DISTINCT \"empid\") AS leaver_count,\n"
         f"  ROUND(\n"
@@ -468,8 +472,10 @@ def _q12_attrition_vol_invol(table: str, f: dict) -> str:
         f"    2\n"
         f"  ) AS pct_of_total\n"
         f"FROM {t}\n"
+        f"CROSS JOIN params p\n"
         f"WHERE \"empstatus\" = 'Inactive'\n"
-        f"{dept_f}{grade_f}{date_f}"
+        f"  AND CAST(\"lwd\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+        f"{dept_f}{grade_f}"
         f"GROUP BY \"final_exit_type\"\n"
         f"ORDER BY leaver_count DESC\n"
         f";"
@@ -482,15 +488,20 @@ def _q13_attrition_exit_reasons(table: str, f: dict) -> str:
     dept_f = _maybe_and_filter("department", f.get("department"))
     grade_f = _maybe_and_filter("grade", f.get("grade"))
     exit_f = _maybe_and_filter("final_exit_type", f.get("exit_type"))
-    date_f = _maybe_date_filter("lwd", f.get("month_start"), f.get("month_end"))
+    ctes, _, _ = _attrition_params_ctes(
+        table, f.get("month_start"), f.get("month_end")
+    )
     return (
-        f"SELECT\n"
+        _with_ctes(ctes)
+        + f"SELECT\n"
         f"  \"final_reason_of_exit\",\n"
         f"  \"final_exit_type\",\n"
         f"  COUNT(DISTINCT \"empid\") AS leaver_count\n"
         f"FROM {t}\n"
+        f"CROSS JOIN params p\n"
         f"WHERE \"empstatus\" = 'Inactive'\n"
-        f"{dept_f}{grade_f}{exit_f}{date_f}"
+        f"  AND CAST(\"lwd\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+        f"{dept_f}{grade_f}{exit_f}"
         f"GROUP BY \"final_reason_of_exit\", \"final_exit_type\"\n"
         f"ORDER BY leaver_count DESC\n"
         f"LIMIT 20\n"
@@ -502,18 +513,19 @@ def _q14_attrition_team(table: str, f: dict) -> str:
     """Q14: Attrition for a specific manager's team."""
     t = _tbl(table)
     mgr_f = _maybe_and_filter("manager_id", f.get("manager_id"))
-    date_f = _maybe_date_filter("lwd", f.get("month_start"), f.get("month_end"))
-
-    if not date_f:
-        date_f = "  AND DATE_TRUNC('month', \"lwd\") = DATE_TRUNC('month', CURRENT_DATE)\n"
-
+    ctes, _, _ = _attrition_params_ctes(
+        table, f.get("month_start"), f.get("month_end")
+    )
     return (
-        f"SELECT\n"
+        _with_ctes(ctes)
+        + f"SELECT\n"
         f"  \"manager_name\",\n"
         f"  COUNT(DISTINCT \"empid\") AS leavers\n"
         f"FROM {t}\n"
+        f"CROSS JOIN params p\n"
         f"WHERE \"empstatus\" = 'Inactive'\n"
-        f"{mgr_f}{date_f}"
+        f"  AND CAST(\"lwd\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+        f"{mgr_f}"
         f"GROUP BY \"manager_name\"\n"
         f"ORDER BY leavers DESC\n"
         f";"
@@ -583,36 +595,58 @@ def _q16_attrition_by_grade(table: str, f: dict) -> str:
     """Q16: Attrition rate by grade/job level."""
     t = _tbl(table)
     dept_f = _maybe_and_filter("department", f.get("department"))
-    date_f = _maybe_date_filter("lwd", f.get("month_start"), f.get("month_end"))
+    ctes, _, _ = _attrition_params_ctes(
+        table, f.get("month_start"), f.get("month_end")
+    )
+    ctes.extend([
+        (
+            "leavers AS (\n"
+            "  SELECT \"grade\", COUNT(DISTINCT \"empid\") AS leaver_count\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"empstatus\" = 'Inactive'\n"
+            "    AND CAST(\"lwd\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{dept_f}"
+            "  GROUP BY \"grade\"\n"
+            ")"
+        ),
+        (
+            "monthly_hc AS (\n"
+            "  SELECT\n"
+            "    DATE_TRUNC('month', \"endofmonth\") AS month,\n"
+            "    \"grade\",\n"
+            "    COUNT(DISTINCT \"empid\") AS active_hc\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"empstatus\" = 'Active'\n"
+            "    AND CAST(\"endofmonth\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{dept_f}"
+            "  GROUP BY DATE_TRUNC('month', \"endofmonth\"), \"grade\"\n"
+            ")"
+        ),
+        (
+            "avg_hc AS (\n"
+            "  SELECT \"grade\", AVG(active_hc) AS avg_active_hc\n"
+            "  FROM monthly_hc\n"
+            "  GROUP BY \"grade\"\n"
+            ")"
+        ),
+    ])
     return (
-        f"WITH leavers AS (\n"
-        f"  SELECT \"grade\", COUNT(DISTINCT \"empid\") AS leaver_count\n"
-        f"  FROM {t}\n"
-        f"  WHERE \"empstatus\" = 'Inactive'\n"
-        f"  {dept_f.strip()}\n"
-        f"  {date_f.strip()}\n"
-        f"  GROUP BY \"grade\"\n"
-        f"),\n"
-        f"total_hc AS (\n"
-        f"  SELECT \"grade\", COUNT(DISTINCT \"empid\") AS active_count\n"
-        f"  FROM {t}\n"
-        f"  WHERE \"empstatus\" = 'Active'\n"
-        f"  {dept_f.strip()}\n"
-        f"  GROUP BY \"grade\"\n"
-        f")\n"
-        f"SELECT\n"
-        f"  COALESCE(l.\"grade\", h.\"grade\") AS grade,\n"
-        f"  COALESCE(l.leaver_count, 0) AS leavers,\n"
-        f"  COALESCE(h.active_count, 0) AS active_hc,\n"
-        f"  ROUND(\n"
-        f"    COALESCE(l.leaver_count, 0) * 100.0 /\n"
-        f"    NULLIF(COALESCE(h.active_count, 0) + COALESCE(l.leaver_count, 0), 0),\n"
-        f"    2\n"
-        f"  ) AS attrition_rate_pct\n"
-        f"FROM leavers l\n"
-        f"FULL OUTER JOIN total_hc h USING (\"grade\")\n"
-        f"ORDER BY attrition_rate_pct DESC\n"
-        f";"
+        _with_ctes(ctes)
+        + "SELECT\n"
+        "  COALESCE(l.\"grade\", a.\"grade\") AS grade,\n"
+        "  COALESCE(l.leaver_count, 0) AS leavers,\n"
+        "  COALESCE(a.avg_active_hc, 0) AS avg_active_hc,\n"
+        "  ROUND(\n"
+        "    COALESCE(l.leaver_count, 0) * 100.0 /\n"
+        "    NULLIF(COALESCE(a.avg_active_hc, 0), 0),\n"
+        "    2\n"
+        "  ) AS attrition_rate_pct\n"
+        "FROM leavers l\n"
+        "FULL OUTER JOIN avg_hc a USING (\"grade\")\n"
+        "ORDER BY attrition_rate_pct DESC\n"
+        ";"
     )
 
 
@@ -620,45 +654,98 @@ def _q17_attrition_by_dept(table: str, f: dict) -> str:
     """Q17: Attrition comparison across departments."""
     t = _tbl(table)
     lob_f = _maybe_and_filter("lob", f.get("lob"))
-    date_f = _maybe_date_filter("lwd", f.get("month_start"), f.get("month_end"))
+    dept_f = _maybe_and_filter("department", f.get("department"))
+    ctes, _, _ = _attrition_params_ctes(
+        table, f.get("month_start"), f.get("month_end")
+    )
+    ctes.extend([
+        (
+            "leavers AS (\n"
+            "  SELECT \"department\", COUNT(DISTINCT \"empid\") AS leaver_count\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"empstatus\" = 'Inactive'\n"
+            "    AND CAST(\"lwd\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{lob_f}{dept_f}"
+            "  GROUP BY \"department\"\n"
+            ")"
+        ),
+        (
+            "monthly_hc AS (\n"
+            "  SELECT\n"
+            "    DATE_TRUNC('month', \"endofmonth\") AS month,\n"
+            "    \"department\",\n"
+            "    COUNT(DISTINCT \"empid\") AS active_hc\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"empstatus\" = 'Active'\n"
+            "    AND CAST(\"endofmonth\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{lob_f}{dept_f}"
+            "  GROUP BY DATE_TRUNC('month', \"endofmonth\"), \"department\"\n"
+            ")"
+        ),
+        (
+            "avg_hc AS (\n"
+            "  SELECT \"department\", AVG(active_hc) AS avg_active_hc\n"
+            "  FROM monthly_hc\n"
+            "  GROUP BY \"department\"\n"
+            ")"
+        ),
+        (
+            "org_leavers AS (\n"
+            "  SELECT COUNT(DISTINCT \"empid\") AS leaver_count\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"empstatus\" = 'Inactive'\n"
+            "    AND CAST(\"lwd\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{lob_f}"
+            ")"
+        ),
+        (
+            "org_monthly_hc AS (\n"
+            "  SELECT\n"
+            "    DATE_TRUNC('month', \"endofmonth\") AS month,\n"
+            "    COUNT(DISTINCT \"empid\") AS active_hc\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"empstatus\" = 'Active'\n"
+            "    AND CAST(\"endofmonth\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{lob_f}"
+            "  GROUP BY DATE_TRUNC('month', \"endofmonth\")\n"
+            ")"
+        ),
+        (
+            "org_avg_hc AS (\n"
+            "  SELECT AVG(active_hc) AS avg_active_hc\n"
+            "  FROM org_monthly_hc\n"
+            ")"
+        ),
+        (
+            "org_avg AS (\n"
+            "  SELECT\n"
+            "    l.leaver_count * 100.0 / NULLIF(a.avg_active_hc, 0) AS org_attrition_pct\n"
+            "  FROM org_leavers l\n"
+            "  CROSS JOIN org_avg_hc a\n"
+            ")"
+        ),
+    ])
     return (
-        f"WITH leavers AS (\n"
-        f"  SELECT \"department\", COUNT(DISTINCT \"empid\") AS leaver_count\n"
-        f"  FROM {t}\n"
-        f"  WHERE \"empstatus\" = 'Inactive'\n"
-        f"  {lob_f.strip()}\n"
-        f"  {date_f.strip()}\n"
-        f"  GROUP BY \"department\"\n"
-        f"),\n"
-        f"total_hc AS (\n"
-        f"  SELECT \"department\", COUNT(DISTINCT \"empid\") AS active_count\n"
-        f"  FROM {t}\n"
-        f"  WHERE \"empstatus\" = 'Active'\n"
-        f"  {lob_f.strip()}\n"
-        f"  GROUP BY \"department\"\n"
-        f"),\n"
-        f"org_avg AS (\n"
-        f"  SELECT\n"
-        f"    SUM(l.leaver_count) * 100.0 /\n"
-        f"    NULLIF(SUM(h.active_count) + SUM(l.leaver_count), 0) AS org_attrition_pct\n"
-        f"  FROM leavers l\n"
-        f"  JOIN total_hc h USING (\"department\")\n"
-        f")\n"
-        f"SELECT\n"
-        f"  COALESCE(l.\"department\", h.\"department\") AS department,\n"
-        f"  COALESCE(l.leaver_count, 0) AS leavers,\n"
-        f"  COALESCE(h.active_count, 0) AS active_hc,\n"
-        f"  ROUND(\n"
-        f"    COALESCE(l.leaver_count, 0) * 100.0 /\n"
-        f"    NULLIF(COALESCE(h.active_count, 0) + COALESCE(l.leaver_count, 0), 0),\n"
-        f"    2\n"
-        f"  ) AS dept_attrition_pct,\n"
-        f"  ROUND(o.org_attrition_pct, 2) AS org_avg_attrition_pct\n"
-        f"FROM leavers l\n"
-        f"FULL OUTER JOIN total_hc h USING (\"department\")\n"
-        f"CROSS JOIN org_avg o\n"
-        f"ORDER BY dept_attrition_pct DESC\n"
-        f";"
+        _with_ctes(ctes)
+        + "SELECT\n"
+        "  COALESCE(l.\"department\", a.\"department\") AS department,\n"
+        "  COALESCE(l.leaver_count, 0) AS leavers,\n"
+        "  COALESCE(a.avg_active_hc, 0) AS avg_active_hc,\n"
+        "  ROUND(\n"
+        "    COALESCE(l.leaver_count, 0) * 100.0 /\n"
+        "    NULLIF(COALESCE(a.avg_active_hc, 0), 0),\n"
+        "    2\n"
+        "  ) AS dept_attrition_pct,\n"
+        "  ROUND(o.org_attrition_pct, 2) AS org_avg_attrition_pct\n"
+        "FROM leavers l\n"
+        "FULL OUTER JOIN avg_hc a USING (\"department\")\n"
+        "CROSS JOIN org_avg o\n"
+        "ORDER BY dept_attrition_pct DESC\n"
+        ";"
     )
 
 
@@ -710,36 +797,58 @@ def _q19_attrition_by_gender(table: str, f: dict) -> str:
     """Q19: Gender-wise attrition rate."""
     t = _tbl(table)
     dept_f = _maybe_and_filter("department", f.get("department"))
-    date_f = _maybe_date_filter("lwd", f.get("month_start"), f.get("month_end"))
+    ctes, _, _ = _attrition_params_ctes(
+        table, f.get("month_start"), f.get("month_end")
+    )
+    ctes.extend([
+        (
+            "leavers AS (\n"
+            "  SELECT \"gender\", COUNT(DISTINCT \"empid\") AS leaver_count\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"empstatus\" = 'Inactive'\n"
+            "    AND CAST(\"lwd\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{dept_f}"
+            "  GROUP BY \"gender\"\n"
+            ")"
+        ),
+        (
+            "monthly_hc AS (\n"
+            "  SELECT\n"
+            "    DATE_TRUNC('month', \"endofmonth\") AS month,\n"
+            "    \"gender\",\n"
+            "    COUNT(DISTINCT \"empid\") AS active_hc\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"empstatus\" = 'Active'\n"
+            "    AND CAST(\"endofmonth\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{dept_f}"
+            "  GROUP BY DATE_TRUNC('month', \"endofmonth\"), \"gender\"\n"
+            ")"
+        ),
+        (
+            "avg_hc AS (\n"
+            "  SELECT \"gender\", AVG(active_hc) AS avg_active_hc\n"
+            "  FROM monthly_hc\n"
+            "  GROUP BY \"gender\"\n"
+            ")"
+        ),
+    ])
     return (
-        f"WITH leavers AS (\n"
-        f"  SELECT \"gender\", COUNT(DISTINCT \"empid\") AS leaver_count\n"
-        f"  FROM {t}\n"
-        f"  WHERE \"empstatus\" = 'Inactive'\n"
-        f"  {dept_f.strip()}\n"
-        f"  {date_f.strip()}\n"
-        f"  GROUP BY \"gender\"\n"
-        f"),\n"
-        f"active_hc AS (\n"
-        f"  SELECT \"gender\", COUNT(DISTINCT \"empid\") AS active_count\n"
-        f"  FROM {t}\n"
-        f"  WHERE \"empstatus\" = 'Active'\n"
-        f"  {dept_f.strip()}\n"
-        f"  GROUP BY \"gender\"\n"
-        f")\n"
-        f"SELECT\n"
-        f"  COALESCE(l.\"gender\", h.\"gender\") AS gender,\n"
-        f"  COALESCE(l.leaver_count, 0) AS leavers,\n"
-        f"  COALESCE(h.active_count, 0) AS active_hc,\n"
-        f"  ROUND(\n"
-        f"    COALESCE(l.leaver_count, 0) * 100.0 /\n"
-        f"    NULLIF(COALESCE(h.active_count, 0) + COALESCE(l.leaver_count, 0), 0),\n"
-        f"    2\n"
-        f"  ) AS attrition_rate_pct\n"
-        f"FROM leavers l\n"
-        f"FULL OUTER JOIN active_hc h USING (\"gender\")\n"
-        f"ORDER BY attrition_rate_pct DESC\n"
-        f";"
+        _with_ctes(ctes)
+        + "SELECT\n"
+        "  COALESCE(l.\"gender\", a.\"gender\") AS gender,\n"
+        "  COALESCE(l.leaver_count, 0) AS leavers,\n"
+        "  COALESCE(a.avg_active_hc, 0) AS avg_active_hc,\n"
+        "  ROUND(\n"
+        "    COALESCE(l.leaver_count, 0) * 100.0 /\n"
+        "    NULLIF(COALESCE(a.avg_active_hc, 0), 0),\n"
+        "    2\n"
+        "  ) AS attrition_rate_pct\n"
+        "FROM leavers l\n"
+        "FULL OUTER JOIN avg_hc a USING (\"gender\")\n"
+        "ORDER BY attrition_rate_pct DESC\n"
+        ";"
     )
 
 
@@ -768,51 +877,64 @@ def _q21_attrition_first_year(table: str, f: dict) -> str:
     t = _tbl(table)
     dept_f = _maybe_and_filter("department", f.get("department"))
     grade_f = _maybe_and_filter("grade", f.get("grade"))
-    date_f = _maybe_date_filter("lwd", f.get("month_start"), f.get("month_end"))
+    ctes, _, _ = _attrition_params_ctes(
+        table, f.get("month_start"), f.get("month_end")
+    )
+    ctes.extend([
+        (
+            "total_leavers AS (\n"
+            "  SELECT COUNT(DISTINCT \"empid\") AS total_count\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"empstatus\" = 'Inactive'\n"
+            "    AND CAST(\"lwd\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{dept_f}{grade_f}"
+            ")"
+        ),
+        (
+            "first_year_leavers AS (\n"
+            "  SELECT COUNT(DISTINCT \"empid\") AS first_year_count\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"empstatus\" = 'Inactive'\n"
+            "    AND \"tenure_months\" <= 12\n"
+            "    AND CAST(\"lwd\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{dept_f}{grade_f}"
+            ")"
+        ),
+    ])
     return (
-        f"WITH total_leavers AS (\n"
-        f"  SELECT COUNT(DISTINCT \"empid\") AS total_count\n"
-        f"  FROM {t}\n"
-        f"  WHERE \"empstatus\" = 'Inactive'\n"
-        f"  {dept_f.strip()}\n"
-        f"  {grade_f.strip()}\n"
-        f"  {date_f.strip()}\n"
-        f"),\n"
-        f"first_year_leavers AS (\n"
-        f"  SELECT COUNT(DISTINCT \"empid\") AS first_year_count\n"
-        f"  FROM {t}\n"
-        f"  WHERE \"empstatus\" = 'Inactive'\n"
-        f"    AND \"tenure_months\" <= 12\n"
-        f"  {dept_f.strip()}\n"
-        f"  {grade_f.strip()}\n"
-        f"  {date_f.strip()}\n"
-        f")\n"
-        f"SELECT\n"
-        f"  f.first_year_count,\n"
-        f"  t.total_count AS total_leavers,\n"
-        f"  ROUND(\n"
-        f"    f.first_year_count * 100.0 / NULLIF(t.total_count, 0),\n"
-        f"    2\n"
-        f"  ) AS first_year_attrition_pct\n"
-        f"FROM first_year_leavers f, total_leavers t\n"
-        f";"
+        _with_ctes(ctes)
+        + "SELECT\n"
+        "  f.first_year_count,\n"
+        "  t.total_count AS total_leavers,\n"
+        "  ROUND(\n"
+        "    f.first_year_count * 100.0 / NULLIF(t.total_count, 0),\n"
+        "    2\n"
+        "  ) AS first_year_attrition_pct\n"
+        "FROM first_year_leavers f, total_leavers t\n"
+        ";"
     )
 
 
 def _q22_attrition_exit_by_dept_grade(table: str, f: dict) -> str:
     """Q22: Exit reasons cross-tabbed by department or grade."""
     t = _tbl(table)
-    date_f = _maybe_date_filter("lwd", f.get("month_start"), f.get("month_end"))
+    ctes, _, _ = _attrition_params_ctes(
+        table, f.get("month_start"), f.get("month_end")
+    )
     return (
-        f"SELECT\n"
+        _with_ctes(ctes)
+        + f"SELECT\n"
         f"  \"department\",\n"
         f"  \"grade\",\n"
         f"  \"final_reason_of_exit\",\n"
         f"  \"final_exit_type\",\n"
         f"  COUNT(DISTINCT \"empid\") AS leaver_count\n"
         f"FROM {t}\n"
+        f"CROSS JOIN params p\n"
         f"WHERE \"empstatus\" = 'Inactive'\n"
-        f"{date_f}"
+        f"  AND CAST(\"lwd\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
         f"GROUP BY \"department\", \"grade\", \"final_reason_of_exit\", \"final_exit_type\"\n"
         f"ORDER BY leaver_count DESC\n"
         f";"
@@ -824,34 +946,43 @@ def _q23_attrition_new_hire(table: str, f: dict) -> str:
     t = _tbl(table)
     dept_f = _maybe_and_filter("department", f.get("department"))
     grade_f = _maybe_and_filter("grade", f.get("grade"))
-    date_f = _maybe_date_filter("endofmonth", f.get("month_start"), f.get("month_end"))
+    ctes, _, _ = _attrition_params_ctes(
+        table, f.get("month_start"), f.get("month_end")
+    )
+    ctes.extend([
+        (
+            "new_hire_leavers AS (\n"
+            "  SELECT COUNT(DISTINCT \"empid\") AS leaver_count\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"empstatus\" = 'Inactive'\n"
+            "    AND \"tenure_months\" <= 6\n"
+            "    AND CAST(\"lwd\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{dept_f}{grade_f}"
+            ")"
+        ),
+        (
+            "new_hires AS (\n"
+            "  SELECT COUNT(DISTINCT \"empid\") AS hire_count\n"
+            f"  FROM {t}\n"
+            "  CROSS JOIN params p\n"
+            "  WHERE \"newhireflag\" = 'Yes'\n"
+            "    AND CAST(\"endofmonth\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+            f"{dept_f}{grade_f}"
+            ")"
+        ),
+    ])
     return (
-        f"WITH new_hire_leavers AS (\n"
-        f"  SELECT COUNT(DISTINCT \"empid\") AS leaver_count\n"
-        f"  FROM {t}\n"
-        f"  WHERE \"empstatus\" = 'Inactive'\n"
-        f"    AND \"tenure_months\" <= 6\n"
-        f"  {dept_f.strip()}\n"
-        f"  {grade_f.strip()}\n"
-        f"  {date_f.strip()}\n"
-        f"),\n"
-        f"new_hires AS (\n"
-        f"  SELECT COUNT(DISTINCT \"empid\") AS hire_count\n"
-        f"  FROM {t}\n"
-        f"  WHERE \"newhireflag\" = 'Yes'\n"
-        f"  {dept_f.strip()}\n"
-        f"  {grade_f.strip()}\n"
-        f"  {date_f.strip()}\n"
-        f")\n"
-        f"SELECT\n"
-        f"  n.hire_count AS new_hires,\n"
-        f"  l.leaver_count AS new_hire_leavers,\n"
-        f"  ROUND(\n"
-        f"    l.leaver_count * 100.0 / NULLIF(n.hire_count, 0),\n"
-        f"    2\n"
-        f"  ) AS new_hire_attrition_pct\n"
-        f"FROM new_hire_leavers l, new_hires n\n"
-        f";"
+        _with_ctes(ctes)
+        + "SELECT\n"
+        "  n.hire_count AS new_hires,\n"
+        "  l.leaver_count AS new_hire_leavers,\n"
+        "  ROUND(\n"
+        "    l.leaver_count * 100.0 / NULLIF(n.hire_count, 0),\n"
+        "    2\n"
+        "  ) AS new_hire_attrition_pct\n"
+        "FROM new_hire_leavers l, new_hires n\n"
+        ";"
     )
 
 
@@ -861,14 +992,19 @@ def _q24_attrition_perf_rating(table: str, f: dict) -> str:
     mgr_f = _maybe_and_filter("manager_id", f.get("manager_id"))
     dept_f = _maybe_and_filter("department", f.get("department"))
     grade_f = _maybe_and_filter("grade", f.get("grade"))
-    date_f = _maybe_date_filter("lwd", f.get("month_start"), f.get("month_end"))
+    ctes, _, _ = _attrition_params_ctes(
+        table, f.get("month_start"), f.get("month_end")
+    )
     return (
-        f"SELECT\n"
+        _with_ctes(ctes)
+        + f"SELECT\n"
         f"  \"emprating\",\n"
         f"  COUNT(DISTINCT \"empid\") AS leaver_count\n"
         f"FROM {t}\n"
+        f"CROSS JOIN params p\n"
         f"WHERE \"empstatus\" = 'Inactive'\n"
-        f"{mgr_f}{dept_f}{grade_f}{date_f}"
+        f"  AND CAST(\"lwd\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+        f"{mgr_f}{dept_f}{grade_f}"
         f"GROUP BY \"emprating\"\n"
         f"ORDER BY leaver_count DESC\n"
         f";"
@@ -881,15 +1017,20 @@ def _q25_attrition_avg_tenure(table: str, f: dict) -> str:
     dept_f = _maybe_and_filter("department", f.get("department"))
     grade_f = _maybe_and_filter("grade", f.get("grade"))
     exit_f = _maybe_and_filter("final_exit_type", f.get("exit_type"))
-    date_f = _maybe_date_filter("lwd", f.get("month_start"), f.get("month_end"))
+    ctes, _, _ = _attrition_params_ctes(
+        table, f.get("month_start"), f.get("month_end")
+    )
     return (
-        f"SELECT\n"
+        _with_ctes(ctes)
+        + f"SELECT\n"
         f"  ROUND(AVG(\"tenure_months\"), 1) AS avg_tenure_months,\n"
         f"  ROUND(AVG(\"tenure_days\") / 365.0, 1) AS avg_tenure_years,\n"
         f"  COUNT(DISTINCT \"empid\") AS total_leavers\n"
         f"FROM {t}\n"
+        f"CROSS JOIN params p\n"
         f"WHERE \"empstatus\" = 'Inactive'\n"
-        f"{dept_f}{grade_f}{exit_f}{date_f}"
+        f"  AND CAST(\"lwd\" AS DATE) BETWEEN p.fy_start AND p.month_end\n"
+        f"{dept_f}{grade_f}{exit_f}"
         f";"
     )
 
