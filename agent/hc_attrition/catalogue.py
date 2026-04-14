@@ -456,11 +456,12 @@ def extract_filters(query: str, intent_key: Optional[str] = None) -> Dict[str, O
     if not filters["month_start"]:
         year_m = re.search(r"\b(20\d{2})\b", query)
         if year_m:
-            ref = date.today().replace(year=int(year_m.group(1)))
-            first, last = month_range(ref.year, ref.month)
+            ref_year = int(year_m.group(1))
+            ref_month = date.today().month
+            first, last = month_range(ref_year, ref_month)
             filters["month_start"] = first.isoformat()
             filters["month_end"] = last.isoformat()
-            filters["year"] = str(ref.year)
+            filters["year"] = str(ref_year)
 
     # Exit type
     if re.search(r"\bvoluntary\b", query, re.I):

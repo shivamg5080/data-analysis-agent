@@ -215,7 +215,7 @@ def _normalize_year(token: str, base_year: Optional[int] = None) -> int:
         if base_year:
             century = base_year // 100
         else:
-            century = 2000 // 100
+            century = date.today().year // 100
         year = century * 100 + year
         if base_year and year < base_year and (base_year - year) > 50:
             year += 100
