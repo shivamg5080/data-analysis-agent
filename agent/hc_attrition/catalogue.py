@@ -24,6 +24,7 @@ _HERE = os.path.dirname(__file__)
 DEFAULT_CATALOGUE_PATH = os.path.normpath(
     os.path.join(_HERE, "..", "..", "catalogue.csv")
 )
+# Maximum regex-captured filter length to reduce runaway matches.
 MAX_FILTER_LEN = 29
 
 
@@ -471,20 +472,24 @@ def extract_filters(query: str, intent_key: Optional[str] = None) -> Dict[str, O
         filters["exit_type"] = "Involuntary"
 
     # LOB
-    lob_m = re.search(
-        rf"(?:lob|line\s+of\s+business)\s*(?:is\s+|=\s*|:\s*)?[\"']?(\w[\w\s\-]{{0,{MAX_FILTER_LEN}}}?)[\"']?"
-        rf"(?=\s+(?:and|or|,|\.|$)|\s+\w+\s+(?:department|dept|grade|lob)|$)",
-        query, re.I
+    # Capture LOB value with a bounded length; lookahead ensures clean boundaries.
+    lob_pattern = (
+        rf"(?:lob|line\s+of\s+business)\s*(?:is\s+|=\s*|:\s*)?[\"']?"
+        rf"(\w[\w\s\-]{{0,{MAX_FILTER_LEN}}}?)"
+        rf"[\"']?(?=\s+(?:and|or|,|\.|$)|\s+\w+\s+(?:department|dept|grade|lob)|$)"
     )
+    lob_m = re.search(lob_pattern, query, re.I)
     if lob_m:
         filters["lob"] = lob_m.group(1).strip()
 
     # Business group
-    bg_m = re.search(
-        rf"business\s+group\s*(?:is\s+|=\s*|:\s*)?[\"']?(\w[\w\s\-]{{0,{MAX_FILTER_LEN}}}?)[\"']?"
-        rf"(?=\s+(?:and|or|,|\.|$)|$)",
-        query, re.I
+    # Capture business group with bounded length and end-boundary lookahead.
+    bg_pattern = (
+        rf"business\s+group\s*(?:is\s+|=\s*|:\s*)?[\"']?"
+        rf"(\w[\w\s\-]{{0,{MAX_FILTER_LEN}}}?)"
+        rf"[\"']?(?=\s+(?:and|or|,|\.|$)|$)"
     )
+    bg_m = re.search(bg_pattern, query, re.I)
     if bg_m:
         filters["businessgroup"] = bg_m.group(1).strip()
 

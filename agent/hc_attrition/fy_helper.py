@@ -14,7 +14,8 @@ from typing import Optional, Tuple
 
 # Indian FY starts in April
 FY_START_MONTH = 4  # April
-YEAR_ROLLOVER_THRESHOLD = 50  # Two-digit years roll over century beyond this gap
+# If base_year - parsed_year exceeds this, assume the next century (e.g., 1999 → 00).
+YEAR_ROLLOVER_THRESHOLD = 50
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +159,7 @@ def parse_month_only(text: str, reference_date: Optional[date] = None) -> Option
         reference_date = date.today()
     year = reference_date.year
     if month > reference_date.month:
+        # Month is in the future relative to the reference date; use latest available year.
         year -= 1
     first = date(year, month, 1)
     last = _last_day_of_month(year, month)
