@@ -14,6 +14,7 @@ from typing import Optional, Tuple
 
 # Indian FY starts in April
 FY_START_MONTH = 4  # April
+YEAR_ROLLOVER_THRESHOLD = 50  # Two-digit years roll over century beyond this gap
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +218,7 @@ def _normalize_year(token: str, base_year: Optional[int] = None) -> int:
         else:
             century = date.today().year // 100
         year = century * 100 + year
-        if base_year and year < base_year and (base_year - year) > 50:
+        if base_year and year < base_year and (base_year - year) > YEAR_ROLLOVER_THRESHOLD:
             year += 100
     return year
 

@@ -24,6 +24,7 @@ _HERE = os.path.dirname(__file__)
 DEFAULT_CATALOGUE_PATH = os.path.normpath(
     os.path.join(_HERE, "..", "..", "catalogue.csv")
 )
+MAX_FILTER_LEN = 29
 
 
 # ---------------------------------------------------------------------------
@@ -471,8 +472,8 @@ def extract_filters(query: str, intent_key: Optional[str] = None) -> Dict[str, O
 
     # LOB
     lob_m = re.search(
-        r"(?:lob|line\s+of\s+business)\s*(?:is\s+|=\s*|:\s*)?[\"']?(\w[\w\s\-]{0,29}?)[\"']?"
-        r"(?=\s+(?:and|or|,|\.|$)|\s+\w+\s+(?:department|dept|grade|lob)|$)",
+        rf"(?:lob|line\s+of\s+business)\s*(?:is\s+|=\s*|:\s*)?[\"']?(\w[\w\s\-]{{0,{MAX_FILTER_LEN}}}?)[\"']?"
+        rf"(?=\s+(?:and|or|,|\.|$)|\s+\w+\s+(?:department|dept|grade|lob)|$)",
         query, re.I
     )
     if lob_m:
@@ -480,8 +481,8 @@ def extract_filters(query: str, intent_key: Optional[str] = None) -> Dict[str, O
 
     # Business group
     bg_m = re.search(
-        r"business\s+group\s*(?:is\s+|=\s*|:\s*)?[\"']?(\w[\w\s\-]{0,29}?)[\"']?"
-        r"(?=\s+(?:and|or|,|\.|$)|$)",
+        rf"business\s+group\s*(?:is\s+|=\s*|:\s*)?[\"']?(\w[\w\s\-]{{0,{MAX_FILTER_LEN}}}?)[\"']?"
+        rf"(?=\s+(?:and|or|,|\.|$)|$)",
         query, re.I
     )
     if bg_m:
