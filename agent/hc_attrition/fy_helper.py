@@ -200,6 +200,13 @@ def _last_day_of_month(year: int, month: int) -> date:
     return date(year, month + 1, 1) - timedelta(days=1)
 
 
+def month_range(year: int, month: int) -> Tuple[date, date]:
+    """Return the first and last dates for the given year/month."""
+    first = date(year, month, 1)
+    last = _last_day_of_month(year, month)
+    return first, last
+
+
 def _normalize_year(token: str, base_year: Optional[int] = None) -> int:
     """Normalize 2-digit or 4-digit year tokens to a 4-digit year."""
     token = token.strip()

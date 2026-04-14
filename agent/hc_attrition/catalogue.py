@@ -368,6 +368,7 @@ def extract_filters(query: str, intent_key: Optional[str] = None) -> Dict[str, O
         parse_specific_date,
         parse_fy_range,
         parse_full_year,
+        month_range,
     )
 
     filters: Dict[str, Optional[str]] = {
@@ -415,8 +416,9 @@ def extract_filters(query: str, intent_key: Optional[str] = None) -> Dict[str, O
     # Explicit date (YYYY-MM-DD)
     explicit_date = parse_specific_date(query)
     if explicit_date:
-        filters["month_start"] = explicit_date.replace(day=1).isoformat()
-        filters["month_end"] = parse_month_year(explicit_date.strftime("%b %Y"))[1].isoformat()
+        first, last = month_range(explicit_date.year, explicit_date.month)
+        filters["month_start"] = first.isoformat()
+        filters["month_end"] = last.isoformat()
         filters["year"] = str(explicit_date.year)
 
     # Month + year
@@ -455,8 +457,7 @@ def extract_filters(query: str, intent_key: Optional[str] = None) -> Dict[str, O
         year_m = re.search(r"\b(20\d{2})\b", query)
         if year_m:
             ref = date.today().replace(year=int(year_m.group(1)))
-            first = date(ref.year, ref.month, 1)
-            last = parse_month_year(ref.strftime("%b %Y"))[1]
+            first, last = month_range(ref.year, ref.month)
             filters["month_start"] = first.isoformat()
             filters["month_end"] = last.isoformat()
             filters["year"] = str(ref.year)
