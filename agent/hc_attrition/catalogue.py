@@ -13,6 +13,7 @@ import csv
 import logging
 import os
 import re
+from datetime import date
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -23,6 +24,8 @@ _HERE = os.path.dirname(__file__)
 DEFAULT_CATALOGUE_PATH = os.path.normpath(
     os.path.join(_HERE, "..", "..", "catalogue.csv")
 )
+# Maximum regex-captured filter length to reduce runaway matches.
+MAX_FILTER_CAPTURE_LEN = 29
 
 
 # ---------------------------------------------------------------------------
@@ -355,18 +358,26 @@ def classify_intent(query: str) -> Tuple[Optional[str], float]:
 # Filter extraction
 # ---------------------------------------------------------------------------
 
-def extract_filters(query: str) -> Dict[str, Optional[str]]:
+def extract_filters(query: str, intent_key: Optional[str] = None) -> Dict[str, Optional[str]]:
     """Extract dimension filters from a natural-language *query*.
 
     Returns a dict with keys matching common HC/Attrition dimensions.
     Values are ``None`` when the dimension is not found in the query.
     """
-    from agent.hc_attrition.fy_helper import parse_month_year
+    from agent.hc_attrition.fy_helper import (
+        parse_month_year,
+        parse_month_only,
+        parse_specific_date,
+        parse_fy_range,
+        parse_full_year,
+        month_range,
+    )
 
     filters: Dict[str, Optional[str]] = {
         "department": None,
         "grade": None,
         "lob": None,
+        "businessgroup": None,
         "manager_id": None,
         "gender": None,
         "month_start": None,   # ISO format: YYYY-MM-DD
@@ -399,23 +410,88 @@ def extract_filters(query: str) -> Dict[str, Optional[str]]:
     if gender_m:
         filters["gender"] = gender_m.group(1).lower()
 
-    # Month + year (named month)
-    parsed = parse_month_year(query)
-    if parsed:
-        filters["month_start"] = parsed[0].isoformat()
-        filters["month_end"] = parsed[1].isoformat()
-        filters["year"] = str(parsed[0].year)
-    else:
-        # Year only
+    is_attrition = bool(
+        (intent_key and intent_key.startswith("attrition_"))
+        or re.search(r"\battrition\b", query, re.I)
+    )
+
+    # Explicit date (YYYY-MM-DD)
+    explicit_date = parse_specific_date(query)
+    if explicit_date:
+        first, last = month_range(explicit_date.year, explicit_date.month)
+        filters["month_start"] = first.isoformat()
+        filters["month_end"] = last.isoformat()
+        filters["year"] = str(explicit_date.year)
+
+    # Month + year
+    if not filters["month_start"]:
+        parsed = parse_month_year(query)
+        if parsed:
+            filters["month_start"] = parsed[0].isoformat()
+            filters["month_end"] = parsed[1].isoformat()
+            filters["year"] = str(parsed[0].year)
+
+    # FY / full year for attrition queries
+    if not filters["month_start"] and is_attrition:
+        fy_range = parse_fy_range(query)
+        if fy_range:
+            filters["month_start"] = fy_range[0].isoformat()
+            filters["month_end"] = fy_range[1].isoformat()
+            filters["year"] = str(fy_range[0].year)
+
+    if not filters["month_start"] and is_attrition:
+        full_year = parse_full_year(query)
+        if full_year:
+            filters["month_start"] = full_year[0].isoformat()
+            filters["month_end"] = full_year[1].isoformat()
+            filters["year"] = str(full_year[1].year)
+
+    # Month only (use latest available year)
+    if not filters["month_start"]:
+        parsed = parse_month_only(query)
+        if parsed:
+            filters["month_start"] = parsed[0].isoformat()
+            filters["month_end"] = parsed[1].isoformat()
+            filters["year"] = str(parsed[0].year)
+
+    # Year only (use current month of that year)
+    if not filters["month_start"]:
         year_m = re.search(r"\b(20\d{2})\b", query)
         if year_m:
-            filters["year"] = year_m.group(1)
+            ref_year = int(year_m.group(1))
+            ref_month = date.today().month
+            first, last = month_range(ref_year, ref_month)
+            filters["month_start"] = first.isoformat()
+            filters["month_end"] = last.isoformat()
+            filters["year"] = str(ref_year)
 
     # Exit type
     if re.search(r"\bvoluntary\b", query, re.I):
         filters["exit_type"] = "Voluntary"
     elif re.search(r"\binvoluntary\b", query, re.I):
         filters["exit_type"] = "Involuntary"
+
+    # LOB
+    # Capture LOB value with a bounded length; lookahead ensures clean boundaries.
+    lob_pattern = (
+        rf"(?:lob|line\s+of\s+business)\s*(?:is\s+|=\s*|:\s*)?[\"']?"
+        rf"(\w[\w\s\-]{{0,{MAX_FILTER_CAPTURE_LEN}}}?)"
+        rf"[\"']?(?=\s+(?:and|or|,|\.|$)|\s+\w+\s+(?:department|dept|grade|lob)|$)"
+    )
+    lob_m = re.search(lob_pattern, query, re.I)
+    if lob_m:
+        filters["lob"] = lob_m.group(1).strip()
+
+    # Business group
+    # Capture business group with bounded length and end-boundary lookahead.
+    bg_pattern = (
+        rf"business\s+group\s*(?:is\s+|=\s*|:\s*)?[\"']?"
+        rf"(\w[\w\s\-]{{0,{MAX_FILTER_CAPTURE_LEN}}}?)"
+        rf"[\"']?(?=\s+(?:and|or|,|\.|$)|$)"
+    )
+    bg_m = re.search(bg_pattern, query, re.I)
+    if bg_m:
+        filters["businessgroup"] = bg_m.group(1).strip()
 
     # Manager ID (simple digit or alphanumeric code)
     mgr_m = re.search(r"manager(?:\s+id)?\s*[=:]\s*[\"']?(\w+)[\"']?", query, re.I)
