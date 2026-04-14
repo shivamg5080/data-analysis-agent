@@ -433,7 +433,7 @@ def _q11_attrition_overall(table: str, f: dict) -> str:
         ),
         (
             "avg_hc AS (\n"
-            "  SELECT AVG(active_hc) AS avg_active_hc\n"
+            "  SELECT ROUND(AVG(active_hc)::NUMERIC, 2) AS avg_active_hc\n"
             "  FROM monthly_hc\n"
             ")"
         ),
@@ -686,7 +686,7 @@ def _q17_attrition_by_dept(table: str, f: dict) -> str:
         ),
         (
             "avg_hc AS (\n"
-            "  SELECT \"department\", AVG(active_hc) AS avg_active_hc\n"
+            "  SELECT \"department\", ROUND(AVG(active_hc)::NUMERIC, 2) AS avg_active_hc\n"
             "  FROM monthly_hc\n"
             "  GROUP BY \"department\"\n"
             ")"
@@ -828,7 +828,7 @@ def _q19_attrition_by_gender(table: str, f: dict) -> str:
         ),
         (
             "avg_hc AS (\n"
-            "  SELECT \"gender\", AVG(active_hc) AS avg_active_hc\n"
+            "  SELECT \"gender\", ROUND(AVG(active_hc)::NUMERIC, 2) AS avg_active_hc\n"
             "  FROM monthly_hc\n"
             "  GROUP BY \"gender\"\n"
             ")"
@@ -1035,6 +1035,123 @@ def _q25_attrition_avg_tenure(table: str, f: dict) -> str:
     )
 
 
+def _q1a_hc_total_snapshot_current_month(table: str, f: dict) -> str:
+    """Q1a: Total active headcount snapshot as of end of current month (auto-detect FY)."""
+    t = _tbl(table)
+    return (
+        "WITH fy_params AS (\n"
+        "  SELECT\n"
+        "    CASE\n"
+        "      WHEN EXTRACT('month' FROM CURRENT_DATE) >= 4\n"
+        "      THEN (DATE_TRUNC('year', CURRENT_DATE) + INTERVAL '3 months')::DATE\n"
+        "      ELSE (DATE_TRUNC('year', CURRENT_DATE) - INTERVAL '9 months')::DATE\n"
+        "    END AS fy_start,\n"
+        "    (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month' - INTERVAL '1 day')::DATE AS month_end,\n"
+        "    CASE\n"
+        "      WHEN EXTRACT('month' FROM CURRENT_DATE) >= 4\n"
+        "      THEN CONCAT('FY', EXTRACT('year' FROM CURRENT_DATE)::INT, '-',\n"
+        "                  (EXTRACT('year' FROM CURRENT_DATE)::INT + 1) % 100)\n"
+        "      ELSE CONCAT('FY', (EXTRACT('year' FROM CURRENT_DATE)::INT - 1), '-',\n"
+        "                  EXTRACT('year' FROM CURRENT_DATE)::INT % 100)\n"
+        "    END AS fy_label,\n"
+        "    TO_CHAR(CURRENT_DATE, 'MMMM YYYY') AS current_month_label\n"
+        ")\n"
+        f"SELECT\n"
+        f"  COUNT(DISTINCT e.\"empid\") AS active_headcount,\n"
+        f"  fp.fy_label AS fiscal_year,\n"
+        f"  fp.current_month_label AS current_month,\n"
+        f"  fp.month_end AS as_of_date\n"
+        f"FROM {t} e\n"
+        f"CROSS JOIN fy_params fp\n"
+        f"WHERE e.\"empstatus\" = 'Active'\n"
+        f"  AND CAST(e.\"endofmonth\" AS DATE) = fp.month_end\n"
+        f"GROUP BY fp.fy_label, fp.current_month_label, fp.month_end\n"
+        f";"
+    )
+
+
+def _q1b_hc_total_snapshot_december_2025(table: str, f: dict) -> str:
+    """Q1b: Total active headcount snapshot as of December 31, 2025."""
+    t = _tbl(table)
+    return (
+        f"SELECT\n"
+        f"  COUNT(DISTINCT \"empid\") AS active_headcount,\n"
+        f"  'FY2025-26' AS fiscal_year,\n"
+        f"  'December 2025' AS current_month,\n"
+        f"  CAST('2025-12-31' AS DATE) AS as_of_date\n"
+        f"FROM {t}\n"
+        f"WHERE \"empstatus\" = 'Active'\n"
+        f"  AND CAST(\"endofmonth\" AS DATE) = CAST('2025-12-31' AS DATE)\n"
+        f";"
+    )
+
+
+def _q3a_hc_by_gender_current_month(table: str, f: dict) -> str:
+    """Q3a: Headcount by gender as of end of current month (auto-detect FY)."""
+    t = _tbl(table)
+    return (
+        "WITH fy_params AS (\n"
+        "  SELECT\n"
+        "    CASE\n"
+        "      WHEN EXTRACT('month' FROM CURRENT_DATE) >= 4\n"
+        "      THEN (DATE_TRUNC('year', CURRENT_DATE) + INTERVAL '3 months')::DATE\n"
+        "      ELSE (DATE_TRUNC('year', CURRENT_DATE) - INTERVAL '9 months')::DATE\n"
+        "    END AS fy_start,\n"
+        "    (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month' - INTERVAL '1 day')::DATE AS month_end,\n"
+        "    CASE\n"
+        "      WHEN EXTRACT('month' FROM CURRENT_DATE) >= 4\n"
+        "      THEN CONCAT('FY', EXTRACT('year' FROM CURRENT_DATE)::INT, '-',\n"
+        "                  (EXTRACT('year' FROM CURRENT_DATE)::INT + 1) % 100)\n"
+        "      ELSE CONCAT('FY', (EXTRACT('year' FROM CURRENT_DATE)::INT - 1), '-',\n"
+        "                  EXTRACT('year' FROM CURRENT_DATE)::INT % 100)\n"
+        "    END AS fy_label,\n"
+        "    TO_CHAR(CURRENT_DATE, 'MMMM YYYY') AS current_month_label\n"
+        ")\n"
+        f"SELECT\n"
+        f"  COALESCE(e.\"gender\", 'Unknown') AS gender,\n"
+        f"  COUNT(DISTINCT e.\"empid\") AS active_headcount,\n"
+        f"  ROUND(\n"
+        f"    COUNT(DISTINCT e.\"empid\") * 100.0 /\n"
+        f"    SUM(COUNT(DISTINCT e.\"empid\")) OVER (),\n"
+        f"    2\n"
+        f"  ) AS percentage_of_total,\n"
+        f"  fp.fy_label AS fiscal_year,\n"
+        f"  fp.current_month_label AS current_month,\n"
+        f"  fp.month_end AS as_of_date\n"
+        f"FROM {t} e\n"
+        f"CROSS JOIN fy_params fp\n"
+        f"WHERE e.\"empstatus\" = 'Active'\n"
+        f"  AND CAST(e.\"endofmonth\" AS DATE) = fp.month_end\n"
+        f"GROUP BY e.\"gender\", fp.fy_label, fp.current_month_label, fp.month_end\n"
+        f"ORDER BY active_headcount DESC, e.\"gender\"\n"
+        f";"
+    )
+
+
+def _q3b_hc_by_gender_december_2025(table: str, f: dict) -> str:
+    """Q3b: Headcount by gender as of December 31, 2025."""
+    t = _tbl(table)
+    return (
+        f"SELECT\n"
+        f"  COALESCE(\"gender\", 'Unknown') AS gender,\n"
+        f"  COUNT(DISTINCT \"empid\") AS active_headcount,\n"
+        f"  ROUND(\n"
+        f"    COUNT(DISTINCT \"empid\") * 100.0 /\n"
+        f"    SUM(COUNT(DISTINCT \"empid\")) OVER (),\n"
+        f"    2\n"
+        f"  ) AS percentage_of_total,\n"
+        f"  'FY2025-26' AS fiscal_year,\n"
+        f"  'December 2025' AS current_month,\n"
+        f"  CAST('2025-12-31' AS DATE) AS as_of_date\n"
+        f"FROM {t}\n"
+        f"WHERE \"empstatus\" = 'Active'\n"
+        f"  AND CAST(\"endofmonth\" AS DATE) = CAST('2025-12-31' AS DATE)\n"
+        f"GROUP BY \"gender\"\n"
+        f"ORDER BY active_headcount DESC, \"gender\"\n"
+        f";"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Template registry
 # ---------------------------------------------------------------------------
@@ -1065,4 +1182,8 @@ _TEMPLATE_MAP: Dict[str, object] = {
     "attrition_new_hire": _q23_attrition_new_hire,
     "attrition_perf_rating": _q24_attrition_perf_rating,
     "attrition_avg_tenure": _q25_attrition_avg_tenure,
+    "hc_total_snapshot_current_month": _q1a_hc_total_snapshot_current_month,
+    "hc_total_snapshot_december_2025": _q1b_hc_total_snapshot_december_2025,
+    "hc_by_gender_current_month": _q3a_hc_by_gender_current_month,
+    "hc_by_gender_december_2025": _q3b_hc_by_gender_december_2025,
 }

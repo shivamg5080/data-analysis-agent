@@ -293,7 +293,7 @@ class TestSQLTemplates:
         """Every intent in the catalogue must produce non-None SQL."""
         from agent.hc_attrition.sql_templates import render_template, list_supported_intents
         intents = list_supported_intents()
-        assert len(intents) == 25, f"Expected 25 intents, got {len(intents)}"
+        assert len(intents) == 29, f"Expected 29 intents, got {len(intents)}"
         for intent_key in intents:
             sql = render_template(intent_key, "test_table")
             assert sql is not None, f"No template rendered for intent: {intent_key}"
